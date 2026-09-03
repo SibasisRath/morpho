@@ -25,16 +25,38 @@ Press **R** or click **Replay** to send them flying again.
 
 ## Use your own photo
 
+One-time setup (Debian/Ubuntu: `sudo apt install python3-pip python3-venv` first):
+
 ```
-pip install numpy opencv-python-headless
-python3 make_face_data.py your_portrait.jpg --points 16000 --out face-data.js
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
 ```
 
-Best results: a front-facing portrait, head filling the middle of the frame, plain-ish
-background, hair darker than the background. It writes `face-preview.png` so you can check
-the mask and depth relief before opening the site. If the mask misses hair, try `--size 1024`
-or a tighter crop. For true 3D relief, run any monocular depth model (Depth Anything, MiDaS)
-on the photo and pass its output with `--depth depth.png`.
+**The easy way — the tuning studio.** Upload a photo, drag sliders, watch the swarm:
+
+```
+.venv/bin/python studio.py        # -> http://localhost:8765
+```
+
+Left panel: every bake knob (dot placement, photo prep) plus live look controls
+(background, size, speed, colour mode, glow). "Save to project" writes `face-data.js`;
+commit + push and the live site has the new face.
+
+**The scriptable way — the CLI** (same pipeline, same knobs as flags):
+
+```
+.venv/bin/python make_face_data.py your_portrait.jpg
+```
+
+Any background works — the photo is face-cropped (YuNet) and person-segmented (rembg)
+automatically; a PNG with transparency skips segmentation and uses its own alpha.
+Check `face-preview.png` (mask contour | dots | depth) before trusting a bake.
+Useful flags: `--tone-gamma` feature drama, `--floor` void aggressiveness, `--body`
+how much clothing shows, `--rim 0.4` outline for dark hair, `--denoise 10` for grainy
+phone shots, `--depth depth.png` for true 3D relief from a monocular depth model.
+
+Best source photos: light from one side (shadow drama is the artwork), sharp focus,
+face reasonably large in frame.
 
 ## Deploy
 

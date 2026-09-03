@@ -95,7 +95,7 @@
 
 <div id="caption" class="ui">
   <h1>Morpho</h1>
-  <p><span id="count">Thousands</span> of butterflies flying into a face. Move your pointer and they scatter, then find their way home.</p>
+  <p><span id="count">Thousands</span> of points of light flying into a face. Move your pointer and they scatter, then find their way home.</p>
 </div>
 <button id="replay" class="ui" type="button">Replay</button>
 
@@ -507,6 +507,11 @@ uniform sampler2D texturePosition;
 uniform sampler2D textureVelocity;
 uniform sampler2D uColor;
 uniform float uTime, uSettle, uScale, uGlowSize, uLodNear, uLodFar;
+uniform float uSizeMul;     // live size multiplier (tuning studio)
+uniform float uColorMode;   // 0 = portrait colours, 1 = single tint, 2 = rainbow
+uniform float uDrift;       // iridescent drift amount at rest
+uniform float uShape;       // 0 = butterflies, 1 = dots
+uniform vec3 uTint;
 varying vec2 vUv;
 varying vec2 vGuv;
 varying vec3 vColor;
@@ -543,25 +548,31 @@ void main() {
   float ca = cos(a), sa = sin(a);
   vec3 local = vec3(position.x * ca, position.y, abs(position.x) * sa);
   // wings are sized to the settled cluster gap; in flight let them be fuller
-  float scale = uScale * (0.75 + 0.5 * h2) * mix(1.7, 0.72, uSettle);
+  float scale = uScale * uSizeMul * (0.75 + 0.5 * h2) * mix(1.7, 0.72, uSettle);
   vec3 world = pos + (r * local.x + f * local.y + u * local.z) * scale;
 
-  /* LOD: near = wings, far = a soft billboard glow. Mixed in view space. */
+  /* LOD: near = wings, far = a soft billboard glow. Mixed in view space.
+     uShape = 1 forces the billboard everywhere — that is "dot mode": the
+     whole piece renders as camera-facing discs instead of butterflies. */
   vec4 mvC = modelViewMatrix * vec4(pos, 1.0);
   float dCam = length(mvC.xyz);
-  float lod = smoothstep(uLodNear, uLodFar, dCam);
+  float lod = max(smoothstep(uLodNear, uLodFar, dCam), uShape);
   vec4 mvWing = modelViewMatrix * vec4(world, 1.0);
   vec2 bb = vec2(position.x, position.y / 0.55);   // both wings together form a square
-  vec4 mvGlow = mvC + vec4(bb * uGlowSize * (0.8 + 0.4 * h2) * (0.7 + 0.15 * dCam), 0.0, 0.0);
+  // dots also breathe with the timeline: fuller in flight, tighter at rest
+  vec4 mvGlow = mvC + vec4(bb * uGlowSize * uSizeMul * (0.8 + 0.4 * h2) * (0.7 + 0.15 * dCam) * mix(1.3, 0.75, uSettle), 0.0, 0.0);
   vec4 mv = mix(mvWing, mvGlow, lod);
   gl_Position = projectionMatrix * mv;
 
-  /* colour: pastel rainbow in flight, the portrait's own colour at rest, with a slow iridescent drift */
-  vec3 flockCol = hsv2rgb(vec3(h, 0.55, 1.0));
+  /* colour: three modes (uColorMode). 0 portrait — pastel rainbow in flight,
+     the photo's own colour at rest (kept inside 0..1 so clusters don't clip
+     to white) with an iridescent drift; 1 mono — everything in one tint;
+     2 rainbow — every butterfly keeps its own hue even at rest */
   vec3 drift = hsv2rgb(vec3(fract(h + uTime * 0.02), 0.5, 1.0));
-  // keep the portrait colour inside 0..1 so clusters don't clip to white,
-  // with a touch more iridescent variety between neighbouring dots
-  vec3 rest = mix(faceCol, drift, 0.12);
+  vec3 flockCol, rest;
+  if (uColorMode < 0.5)      { flockCol = hsv2rgb(vec3(h, 0.55, 1.0)); rest = mix(faceCol, drift, uDrift); }
+  else if (uColorMode < 1.5) { flockCol = uTint;                       rest = uTint; }
+  else                       { flockCol = hsv2rgb(vec3(h, 0.55, 1.0)); rest = hsv2rgb(vec3(h, 0.75, 1.0)); }
   vColor = mix(flockCol, rest, uSettle);
   vShade = mix(0.55, 1.0, ca * 0.5 + 0.5);
   vLod = lod;
@@ -574,6 +585,7 @@ const BUTTERFLY_FRAG = /* glsl */`
 uniform sampler2D uWing;
 uniform sampler2D uGlow;
 uniform float uIntensity;
+uniform float uShape;       // 0 = butterflies, 1 = dots
 varying vec2 vUv;
 varying vec2 vGuv;
 varying vec3 vColor;
@@ -582,6 +594,11 @@ varying float vShade;
 void main() {
   vec4 w = texture2D(uWing, vUv);
   float g = texture2D(uGlow, vGuv).a;
+  // dot mode: swap the soft glow falloff for a crisp disc with a hint of halo
+  if (uShape > 0.5) {
+    float d = length(vGuv - 0.5);
+    g = smoothstep(0.42, 0.34, d) + 0.25 * g;
+  }
   float a = mix(w.a, g, vLod);
   if (a < 0.02) discard;
   vec3 col = mix(vColor * w.rgb * vShade, vColor, vLod);
@@ -608,6 +625,11 @@ const butterflyMat = new THREE.ShaderMaterial({
     uLodNear: { value: 4.2 },
     uLodFar: { value: 7.5 },
     uIntensity: { value: 1.0 },
+    uSizeMul: { value: 1.0 },
+    uColorMode: { value: 0 },
+    uDrift: { value: 0.12 },
+    uShape: { value: 1 },   // dots by default for now; butterflies via configure({shape:'butterfly'})
+    uTint: { value: new THREE.Color('#ffd9a0') },
   },
   defines: { DIRECT_OUTPUT: TIER.bloom ? 0 : 1 },
   vertexShader: BUTTERFLY_VERT,
@@ -659,6 +681,9 @@ document.addEventListener('pointerleave', () => { pointerActive = false; });
 /* ------------------------------------------------------------------ */
 const T_FLOCK = reduceMotion ? 0.6 : 4.5;    // seconds of free flight
 const T_SETTLE = reduceMotion ? 2.5 : 7.0;   // seconds to gather into the face
+// Live-tunable values (see section 8's configure()); declared before the
+// frame loop starts because frame() reads them from its very first tick.
+const CONFIG = { speed: 1, intensity: 1, bloomStrength: 0.45 };
 const clock = new THREE.Clock();
 let t = 0, settle = 0, camBlend = 0;
 let frames = 0, fpsAccum = 0, fps = 0;
@@ -682,6 +707,7 @@ function frame() {
   if (document.hidden) return;
   let dt = clock.getDelta();
   if (dt > 1 / 30) dt = 1 / 30;             // never let a hitch explode the spring
+  dt *= CONFIG.speed;                       // live time-scale (tuning studio)
   t += dt;
 
   settle = smootherstep(T_FLOCK, T_FLOCK + T_SETTLE, t);
@@ -721,8 +747,8 @@ function frame() {
   bu.uTime.value = t; bu.uSettle.value = settle;
   // dial the additive glow down as the face forms: dreamy in flight,
   // crisp distinct dots at rest (clusters overlap, so full intensity clips white)
-  bu.uIntensity.value = (TIER.bloom ? 1.0 : 1.25) * (1.0 - 0.55 * settle);
-  if (bloomPass) bloomPass.strength = 0.45 * (1.0 - 0.75 * settle);
+  bu.uIntensity.value = (TIER.bloom ? 1.0 : 1.25) * CONFIG.intensity * (1.0 - 0.55 * settle);
+  if (bloomPass) bloomPass.strength = CONFIG.bloomStrength * (1.0 - 0.75 * settle);
   if (composer) composer.render(); else renderer.render(scene, camera);
 
   // housekeeping
@@ -744,6 +770,33 @@ frame();
 
 // Everything you might want to poke at from the console while studying:
 window.SWARM = { renderer, scene, camera, gpu, velU, posU, butterflyMat, TIER, replay, get settle() { return settle; } };
+
+/* ------------------------------------------------------------------ */
+/*  8. Live config API — used by the tuning studio (studio.py), or     */
+/*     from the console: SWARM.configure({ size: 1.5, speed: 0.5 })    */
+/*     (the CONFIG object itself is declared above the frame loop)     */
+/* ------------------------------------------------------------------ */
+function configure(c) {
+  const bu = butterflyMat.uniforms;
+  if (c.speed      !== undefined) CONFIG.speed = +c.speed;                 // 0.2 slow-motion … 3 frantic
+  if (c.intensity  !== undefined) CONFIG.intensity = +c.intensity;         // brightness of the butterflies
+  if (c.bloomStrength !== undefined) CONFIG.bloomStrength = +c.bloomStrength; // glow amount (bloom tier only)
+  if (c.size       !== undefined) bu.uSizeMul.value = +c.size;             // wing size multiplier
+  if (c.drift      !== undefined) bu.uDrift.value = +c.drift;              // iridescent shimmer at rest
+  if (c.colorMode  !== undefined) bu.uColorMode.value =                    // 'portrait' | 'mono' | 'rainbow'
+      c.colorMode === 'mono' ? 1 : c.colorMode === 'rainbow' ? 2 : 0;
+  if (c.tint       !== undefined) bu.uTint.value.set(c.tint);              // colour for 'mono' mode
+  if (c.shape      !== undefined) bu.uShape.value = c.shape === 'dot' ? 1 : 0;   // 'dot' | 'butterfly'
+  if (c.bg         !== undefined) document.documentElement.style.setProperty('--dusk', c.bg);
+  if (c.bgDeep     !== undefined) document.documentElement.style.setProperty('--dusk-deep', c.bgDeep);
+  if (c.haze       !== undefined) document.getElementById('haze').style.background =
+      `radial-gradient(70% 60% at 50% 45%, ${c.haze} 0%, transparent 60%)`;
+  if (c.replay) replay();
+}
+SWARM.configure = configure;
+addEventListener('message', e => {
+  if (e.data && e.data.type === 'morpho-config') configure(e.data.config);
+});
 </script>
 </body>
 </html>

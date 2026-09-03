@@ -1,3 +1,8 @@
 # stale packaged duplicate of files/morpho — regenerate when cutting a release
 morpho.zip
 __pycache__/
+.venv/
+*.u2net/
+.studio/
+assets/
+face-preview.png

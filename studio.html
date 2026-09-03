@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Morpho Studio</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🎛️</text></svg>" />
+<style>
+  /* ---- layout: fixed control rail on the left, the live site fills the rest ---- */
+  :root { --bg: #14101f; --panel: #1d1730; --line: #322a4d; --text: #e8e2f4; --dim: #9a90b8; --accent: #c9a1ff; }
+  * { box-sizing: border-box; }
+  body { margin: 0; height: 100vh; display: flex; background: var(--bg); color: var(--text);
+         font: 13px/1.45 system-ui, sans-serif; }
+  #panel { width: 320px; flex: none; overflow-y: auto; background: var(--panel);
+           border-right: 1px solid var(--line); padding: 14px 16px 40px; }
+  #view { flex: 1; display: flex; }
+  #frame { flex: 1; border: 0; }
+
+  h1 { font-size: 15px; margin: 2px 0 10px; }
+  h2 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--accent);
+       margin: 20px 0 8px; border-bottom: 1px solid var(--line); padding-bottom: 4px; }
+  label { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 7px 0; }
+  label > span:first-child { color: var(--dim); flex: none; width: 92px;
+                             border-bottom: 1px dotted #4a4070; cursor: help; }
+  input[type=range] { flex: 1; accent-color: var(--accent); }
+  output { width: 38px; text-align: right; font-variant-numeric: tabular-nums; }
+  select, input[type=color], button { background: #2a2246; color: var(--text); border: 1px solid var(--line);
+           border-radius: 6px; padding: 4px 8px; }
+  input[type=color] { padding: 1px 3px; width: 52px; height: 26px; }
+  input[type=file] { width: 100%; color: var(--dim); font-size: 12px; }
+  button { cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button:disabled { opacity: 0.4; cursor: default; }
+  #bake { width: 100%; padding: 9px; font-weight: 600; background: var(--accent); color: #1a1028;
+          border: 0; border-radius: 8px; margin-top: 10px; }
+  #bake:disabled { opacity: 0.5; cursor: wait; }
+  #status { min-height: 18px; color: var(--dim); margin-top: 8px; font-size: 12px; white-space: pre-wrap; }
+  #status.err { color: #ff9d9d; }
+  #previewImg { width: 100%; border-radius: 6px; margin-top: 8px; display: none; }
+  .row { display: flex; gap: 8px; margin-top: 8px; }
+  .row button { flex: 1; }
+  .hint { color: var(--dim); font-size: 11px; margin: 2px 0 0; }
+</style>
+</head>
+<body>
+
+<div id="panel">
+  <h1>🎛️ Morpho Studio</h1>
+  <p class="hint">Bake knobs need a re-bake; Look knobs are live. Hover any name for what it does.</p>
+
+  <!-- history: every finished adjustment is snapshotted (10 steps) -->
+  <div class="row">
+    <button id="undo" title="Step back through your last adjustments (also Ctrl+Z)">↩ Undo</button>
+    <button id="redo" title="Step forward again (also Ctrl+Shift+Z)">↪ Redo</button>
+    <button id="reset" title="Every knob back to its default value">Reset</button>
+  </div>
+
+  <h2>Photo</h2>
+  <label title="Any portrait photo. The background is removed automatically (rembg); a PNG with transparency skips that and uses its own alpha as the mask.">
+    <span>photo</span><input type="file" id="photo" accept="image/*" />
+  </label>
+
+  <h2>Bake — dot placement</h2>
+  <!-- data-p = pipeline parameter name in make_face_data.DEFAULTS -->
+  <label title="How many dots are baked into the cloud. The site displays up to the 'simulation size' count; extra dots simply aren't shown, extra particles stack on existing dots.">
+    <span>points</span><input type="range" data-p="points" min="4000" max="40000" step="1000" value="16000" /><output>16000</output></label>
+  <label title="Steepness of the brightness → density curve. Higher = only the brightest skin keeps dense dots, midtones thin out — more drama, more voids.">
+    <span>tone gamma</span><input type="range" data-p="tone_gamma" min="1" max="4" step="0.1" value="2.6" /><output>2.6</output></label>
+  <label title="Hard cutoff: any density below this becomes ZERO dots. Higher = bigger pure-black voids in shadows (eye sockets, under the chin).">
+    <span>floor (voids)</span><input type="range" data-p="floor" min="0" max="0.4" step="0.01" value="0.18" /><output>0.18</output></label>
+  <label title="Which brightness percentile counts as 'pure white'. Lower = more of the face reaches full dot density; higher = only true highlights do.">
+    <span>tone hi %</span><input type="range" data-p="tone_hi" min="50" max="99" step="1" value="80" /><output>80</output></label>
+  <label title="Extra dots along detected edges — glasses frames, lip lines, brows, jawline.">
+    <span>edge detail</span><input type="range" data-p="edge" min="0" max="0.6" step="0.05" value="0.15" /><output>0.15</output></label>
+  <label title="Dot density outside the face region. 0 = floating head only, 1 = clothing rendered as densely as the face. Keeps a white shirt from stealing the show.">
+    <span>body density</span><input type="range" data-p="body" min="0" max="1" step="0.05" value="0.35" /><output>0.35</output></label>
+  <label title="A dotted outline traced along the person's silhouette. Rescues dark hair that would otherwise vanish into the dark background.">
+    <span>hair rim</span><input type="range" data-p="rim" min="0" max="0.8" step="0.05" value="0" /><output>0</output></label>
+
+  <h2>Bake — photo prep</h2>
+  <label title="CLAHE adaptive contrast, applied before tone mapping. Reveals light/shadow form in flat, evenly-lit photos. 0 = off.">
+    <span>local contrast</span><input type="range" data-p="clahe" min="0" max="4" step="0.25" value="2" /><output>2</output></label>
+  <label title="Unsharp relief: amplifies local light-vs-shadow differences so the nose ridge, brow and cheeks carve into the dot density.">
+    <span>relief</span><input type="range" data-p="contrast" min="0" max="2.5" step="0.1" value="1" /><output>1</output></label>
+  <label title="Smooths sensor grain BEFORE the contrast stages, so noise doesn't get amplified into fake detail dots. Raise for dim/grainy phone photos.">
+    <span>denoise</span><input type="range" data-p="denoise" min="0" max="15" step="1" value="5" /><output>5</output></label>
+  <label title="How much 3D depth the face relief gets (z-range in scene units). 0 = flat poster, higher = deeper nose/brow when the view shifts.">
+    <span>depth range</span><input type="range" data-p="depth_scale" min="0" max="1.2" step="0.05" value="0.6" /><output>0.6</output></label>
+  <label title="Skip the automatic crop around the detected face and use the full photo frame instead.">
+    <span>skip crop</span><input type="checkbox" data-p="no_crop" /><span></span></label>
+
+  <button id="bake" title="Run the photo → dot-cloud pipeline with the knobs above (a few seconds; segmentation runs on CPU)">Bake ⚗️</button>
+  <div id="status"></div>
+  <img id="previewImg" alt="bake preview" title="Left: what the mask kept (green line). Middle: the baked dots. Right: depth relief." />
+
+  <h2>Look — live</h2>
+  <label title="Particle size multiplier. Smaller = crisper halftone; bigger = softer, more merged.">
+    <span>size</span><input type="range" data-c="size" min="0.3" max="3" step="0.05" value="1" /><output>1</output></label>
+  <label title="Animation time scale: 0.2 dreamy slow-motion … 3 frantic. Affects flight, settling and scatter alike.">
+    <span>speed</span><input type="range" data-c="speed" min="0.2" max="3" step="0.05" value="1" /><output>1</output></label>
+  <label title="Bloom halo strength around bright particles. Automatically eases off as the face settles so the portrait stays crisp.">
+    <span>glow</span><input type="range" data-c="bloomStrength" min="0" max="1.2" step="0.05" value="0.45" /><output>0.45</output></label>
+  <label title="Raw particle brightness. Too high and dense areas add up past white and lose their colour.">
+    <span>brightness</span><input type="range" data-c="intensity" min="0.3" max="2" step="0.05" value="1" /><output>1</output></label>
+  <label title="Iridescent colour drift on the settled portrait: 0 = the photo's exact colours, higher = neighbouring dots shimmer in different hues.">
+    <span>shimmer</span><input type="range" data-c="drift" min="0" max="1" step="0.05" value="0.12" /><output>0.12</output></label>
+  <label title="What each particle is drawn as. Same simulation underneath — switch any time.">
+    <span>particles</span>
+    <select id="shape">
+      <option value="dot" selected>dots</option>
+      <option value="butterfly">butterflies</option>
+    </select>
+  </label>
+  <label title="portrait = the photo's own colours at rest; single = everything in one tint; rainbow = every particle keeps its own hue.">
+    <span>colours</span>
+    <select id="colorMode">
+      <option value="portrait">portrait (photo)</option>
+      <option value="mono">single colour</option>
+      <option value="rainbow">rainbow</option>
+    </select>
+  </label>
+  <label title="The colour used when 'single colour' mode is selected.">
+    <span>tint (mono)</span><input type="color" id="tint" value="#ffd9a0" /><span></span></label>
+  <label title="Page background gradient: first the mid colour behind the face, then the deep colour at the edges.">
+    <span>background</span><input type="color" id="bg" value="#1c1030" /><input type="color" id="bgDeep" value="#0a0714" /></label>
+  <label title="Simulation size (reloads the frame). More particles = finer portrait but heavier on the GPU. Your baked points should roughly match.">
+    <span>particle count</span>
+    <select id="count">
+      <option value="64">4,096</option><option value="96">9,216</option>
+      <option value="112">12,544</option><option value="128" selected>16,384</option>
+      <option value="160">25,600</option><option value="192">36,864</option>
+    </select>
+  </label>
+  <label title="Enable/disable the bloom post-processing pass entirely (reloads the frame). Distinct from the 'glow' slider, which sets its strength.">
+    <span>bloom pass</span><input type="checkbox" id="bloomOn" checked /><span></span></label>
+  <div class="row">
+    <button id="replay" title="Send the swarm flying again from scratch (same as pressing R on the site)">Replay ↺</button>
+    <button id="reload" title="Reload the site frame (needed only if something looks stuck)">Reload frame</button>
+  </div>
+
+  <h2>Export</h2>
+  <div class="row">
+    <button id="save" title="Write the current bake into the project's face-data.js — nothing goes live until you commit & push">Save to project 💾</button>
+    <button id="copyCfg" title="Copy the Look settings as JSON, for hard-coding the chosen look into index.html later">Copy look JSON</button>
+  </div>
+  <p class="hint">Save writes face-data.js in the repo — commit &amp; push makes it live.</p>
+</div>
+
+<div id="view"><iframe id="frame" src="/site/?stats=1"></iframe></div>
+
+<script>
+/* The studio is deliberately dependency-free: sliders post their values
+   either to /api/bake (data-p = pipeline knob, needs a re-bake) or straight
+   into the iframe via the site's postMessage config API (data-c = live).
+   A 10-step undo/redo history snapshots the whole panel after each
+   finished adjustment ('change' events, so drags count once). */
+const $ = s => document.querySelector(s);
+const frame = $('#frame');
+const CONTROLS = () => document.querySelectorAll('#panel input:not([type=file]), #panel select');
+const keyOf = el => el.dataset.p || el.dataset.c || el.id;
+
+// live value readouts next to every slider
+document.querySelectorAll('input[type=range]').forEach(r => {
+  r.addEventListener('input', () => r.nextElementSibling.textContent = r.value);
+});
+
+// ---- Look: push live config into the iframe ----
+function look() {
+  return {
+    size: +$('[data-c=size]').value,
+    speed: +$('[data-c=speed]').value,
+    bloomStrength: +$('[data-c=bloomStrength]').value,
+    intensity: +$('[data-c=intensity]').value,
+    drift: +$('[data-c=drift]').value,
+    shape: $('#shape').value,
+    colorMode: $('#colorMode').value,
+    tint: $('#tint').value,
+    bg: $('#bg').value,
+    bgDeep: $('#bgDeep').value,
+  };
+}
+function push(extra = {}) {
+  frame.contentWindow.postMessage({ type: 'morpho-config', config: { ...look(), ...extra } }, '*');
+}
+document.querySelectorAll('[data-c], #shape, #colorMode, #tint, #bg, #bgDeep')
+  .forEach(el => el.addEventListener('input', () => push()));
+$('#replay').onclick = () => push({ replay: true });
+frame.addEventListener('load', () => setTimeout(() => push(), 400));  // re-apply after any reload
+
+// count / bloom-pass changes need a page reload (they rebuild GPU textures)
+function reloadFrame() {
+  const n = $('#count').value, bloom = $('#bloomOn').checked ? 1 : 0;
+  frame.src = `/site/?stats=1&n=${n}&bloom=${bloom}`;
+}
+$('#count').addEventListener('change', reloadFrame);
+$('#bloomOn').addEventListener('change', reloadFrame);
+$('#reload').onclick = reloadFrame;
+
+// ---- History: snapshot / restore the whole panel (10 steps) ----
+const snapshot = () => {
+  const s = {};
+  CONTROLS().forEach(el => s[keyOf(el)] = el.type === 'checkbox' ? el.checked : el.value);
+  return s;
+};
+const DEFAULTS = snapshot();                 // the HTML's initial values ARE the defaults
+let history = [snapshot()], hIndex = 0;
+
+function restore(s) {
+  const before = { count: $('#count').value, bloom: $('#bloomOn').checked };
+  CONTROLS().forEach(el => {
+    const v = s[keyOf(el)];
+    if (v === undefined) return;
+    if (el.type === 'checkbox') el.checked = v; else el.value = v;
+    if (el.type === 'range') el.nextElementSibling.textContent = el.value;
+  });
+  if ($('#count').value !== before.count || $('#bloomOn').checked !== before.bloom) reloadFrame();
+  else push();
+  updateHistoryButtons();
+}
+function pushHistory() {
+  const s = snapshot();
+  if (JSON.stringify(s) === JSON.stringify(history[hIndex])) return;   // nothing changed
+  history = history.slice(0, hIndex + 1);    // drop any redo tail
+  history.push(s);
+  if (history.length > 11) history.shift();  // current + 10 undoable steps
+  hIndex = history.length - 1;
+  updateHistoryButtons();
+}
+function updateHistoryButtons() {
+  $('#undo').disabled = hIndex <= 0;
+  $('#redo').disabled = hIndex >= history.length - 1;
+}
+CONTROLS().forEach(el => el.addEventListener('change', pushHistory));
+$('#undo').onclick = () => { if (hIndex > 0) restore(history[--hIndex]); };
+$('#redo').onclick = () => { if (hIndex < history.length - 1) restore(history[++hIndex]); };
+$('#reset').onclick = () => { restore(DEFAULTS); pushHistory(); };
+addEventListener('keydown', e => {
+  if (!(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== 'z') return;
+  e.preventDefault();
+  (e.shiftKey ? $('#redo') : $('#undo')).click();
+});
+updateHistoryButtons();
+
+// ---- Bake: gather pipeline knobs, POST, reload the iframe on success ----
+$('#bake').onclick = async () => {
+  const fd = new FormData();
+  const photo = $('#photo').files[0];
+  if (photo) fd.append('photo', photo);
+  document.querySelectorAll('[data-p]').forEach(el => {
+    fd.append(el.dataset.p, el.type === 'checkbox' ? (el.checked ? '1' : '0') : el.value);
+  });
+  $('#bake').disabled = true;
+  $('#status').textContent = 'baking… (segmentation runs on CPU, give it a few seconds)';
+  $('#status').className = '';
+  try {
+    const res = await fetch('/api/bake', { method: 'POST', body: fd });
+    const out = await res.json();
+    if (!res.ok) throw new Error(out.error || res.statusText);
+    $('#status').textContent = `baked ${out.count.toLocaleString()} points (~${out.kb} KB)`;
+    $('#previewImg').src = '/api/preview.png?' + Date.now();
+    $('#previewImg').style.display = 'block';
+    reloadFrame();
+  } catch (e) {
+    $('#status').textContent = e.message;
+    $('#status').className = 'err';
+  }
+  $('#bake').disabled = false;
+};
+
+// ---- Export ----
+$('#save').onclick = async () => {
+  const res = await fetch('/api/save', { method: 'POST' });
+  const out = await res.json();
+  $('#status').className = res.ok ? '' : 'err';
+  $('#status').textContent = res.ok ? 'saved face-data.js — ready to commit' : out.error;
+};
+$('#copyCfg').onclick = () => {
+  navigator.clipboard.writeText(JSON.stringify(look(), null, 2));
+  $('#status').textContent = 'look config copied to clipboard';
+};
+</script>
+</body>
+</html>

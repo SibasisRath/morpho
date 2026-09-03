@@ -1,0 +1,748 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Morpho — a swarm dreams a face</title>
+<meta name="description" content="Tens of thousands of GPU-simulated butterflies flock across the screen, then settle into a portrait made of light." />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,400;1,9..144,300&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --dusk-deep: #0a0714;
+    --dusk: #1c1030;
+    --ink: #efe6d8;
+    --ink-dim: rgba(239, 230, 216, 0.62);
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: radial-gradient(120% 90% at 50% 40%, var(--dusk) 0%, var(--dusk-deep) 70%);
+    color: var(--ink);
+    font-family: "Fraunces", "Iowan Old Style", "Palatino Linotype", Georgia, serif;
+    font-optical-sizing: auto;
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+  }
+  #stage { position: fixed; inset: 0; display: block; touch-action: none; }
+  #haze {
+    position: fixed; inset: 0; pointer-events: none; mix-blend-mode: screen;
+    background: radial-gradient(70% 60% at 50% 45%, rgba(44, 26, 78, 0.9) 0%, rgba(44, 26, 78, 0) 60%);
+  }
+  #vignette {
+    position: fixed; inset: 0; pointer-events: none;
+    background: radial-gradient(75% 65% at 50% 50%, transparent 42%, rgba(6, 3, 14, 0.7) 100%);
+  }
+
+  /* Interface: a whisper around the swarm. Hidden until the face has settled. */
+  .ui { position: fixed; z-index: 2; opacity: 0; transition: opacity 1.8s ease; }
+  body.settled .ui { opacity: 1; }
+  body.settled .ui.replaying { opacity: 0; }
+
+  #caption {
+    left: clamp(20px, 4vw, 56px); bottom: clamp(20px, 4vh, 44px);
+    max-width: 34ch;
+  }
+  #caption h1 {
+    margin: 0 0 6px;
+    font-weight: 300; font-style: italic;
+    font-size: clamp(30px, 4.2vw, 54px);
+    letter-spacing: -0.01em; line-height: 1;
+    font-variation-settings: "opsz" 144;
+  }
+  #caption p {
+    margin: 0; font-size: clamp(14px, 1.15vw, 16px);
+    line-height: 1.55; color: var(--ink-dim);
+    font-variation-settings: "opsz" 12;
+  }
+  #caption p span { color: var(--ink); }
+
+  #replay {
+    right: clamp(20px, 4vw, 56px); top: clamp(18px, 3vh, 36px);
+    font: inherit; font-size: 15px; font-variation-settings: "opsz" 12;
+    color: var(--ink-dim); background: none; border: 0; padding: 8px 2px;
+    cursor: pointer; border-bottom: 1px solid transparent;
+  }
+  #replay:hover, #replay:focus-visible { color: var(--ink); border-bottom-color: var(--ink-dim); outline: none; }
+
+  #loading {
+    position: fixed; inset: 0; display: grid; place-items: center; z-index: 3;
+    color: var(--ink-dim); font-style: italic; font-size: 18px;
+    transition: opacity 1.2s ease; pointer-events: none;
+  }
+  #loading.gone { opacity: 0; }
+
+  #stats { position: fixed; left: 12px; top: 12px; z-index: 4; font: 12px/1.4 ui-monospace, monospace; color: var(--ink-dim); white-space: pre; display: none; }
+
+  @media (max-width: 640px) {
+    #caption { max-width: 26ch; }
+    #replay { top: auto; bottom: clamp(20px, 4vh, 44px); right: 20px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .ui { transition: none; }
+  }
+</style>
+</head>
+<body>
+<canvas id="stage"></canvas>
+<div id="haze"></div>
+<div id="vignette"></div>
+
+<div id="loading">Gathering butterflies</div>
+<div id="stats"></div>
+
+<div id="caption" class="ui">
+  <h1>Morpho</h1>
+  <p><span id="count">Thousands</span> of butterflies flying into a face. Move your pointer and they scatter, then find their way home.</p>
+</div>
+<button id="replay" class="ui" type="button">Replay</button>
+
+<!-- Point-cloud portrait baked by make_face_data.py -->
+<script src="face-data.js"></script>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.185.1/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.185.1/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { GPUComputationRenderer } from 'three/addons/misc/GPUComputationRenderer.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+
+/* ------------------------------------------------------------------ */
+/*  0. Device tier — how many butterflies, and do we afford bloom?     */
+/* ------------------------------------------------------------------ */
+const params = new URLSearchParams(location.search);
+const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+function pickTier() {
+  const ua = navigator.userAgent;
+  const isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(ua) || (navigator.maxTouchPoints > 1 && innerWidth < 900);
+  const cores = navigator.hardwareConcurrency || 4;
+  let tier;
+  if (isMobile) tier = cores >= 8 ? { size: 96, bloom: false, dpr: 1.5 } : { size: 72, bloom: false, dpr: 1.25 };
+  else if (cores >= 8) tier = { size: 128, bloom: true, dpr: 2 };
+  else tier = { size: 112, bloom: true, dpr: 1.5 };
+  tier.dpr = Math.min(tier.dpr, devicePixelRatio || 1);
+  // Overrides for experiments: ?n=160&bloom=0&stats=1
+  if (params.has('n')) tier.size = Math.max(16, Math.min(256, parseInt(params.get('n'), 10) || tier.size));
+  if (params.has('bloom')) tier.bloom = params.get('bloom') !== '0';
+  return tier;
+}
+const TIER = pickTier();
+const SIZE = TIER.size;             // compute texture is SIZE x SIZE
+const COUNT = SIZE * SIZE;          // one butterfly per texel
+// Average gap between neighbouring dots on the face — computed after the point
+// cloud is decoded (see below): the cloud is stippled, dots cluster on features
+// with empty skin between them, so wings must be sized to the gap inside the
+// clusters, not to a filled head area.
+let SPACING;
+
+/* ------------------------------------------------------------------ */
+/*  1. Face data — unpack the baked point cloud into GPU textures      */
+/* ------------------------------------------------------------------ */
+function decodeFace() {
+  const d = window.FACE_DATA;
+  const bytes = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+  const q = new Uint16Array(bytes(d.xyz).buffer);
+  const c = bytes(d.rgb);
+  const n = d.count;
+  const xyz = new Float32Array(n * 3);
+  for (let i = 0; i < n * 3; i++) {
+    const k = i % 3;
+    xyz[i] = d.min[k] + (q[i] / 65535) * (d.max[k] - d.min[k]);
+  }
+  return { n, xyz, rgb: c };
+}
+const FACE = decodeFace();
+
+// Measure the area the dots actually occupy with a coarse grid, then size the
+// wings to the average gap between dots inside that area. min(COUNT, FACE.n):
+// extra butterflies stack on existing dots, so they don't tighten the gap.
+{
+  const G = 80, cells = new Set();
+  let minX = 1e9, maxX = -1e9, minY = 1e9, maxY = -1e9;
+  for (let i = 0; i < FACE.n; i++) {
+    const x = FACE.xyz[i * 3], y = FACE.xyz[i * 3 + 1];
+    if (x < minX) minX = x; if (x > maxX) maxX = x;
+    if (y < minY) minY = y; if (y > maxY) maxY = y;
+  }
+  for (let i = 0; i < FACE.n; i++) {
+    const gx = Math.min(G - 1, ((FACE.xyz[i * 3] - minX) / (maxX - minX) * G) | 0);
+    const gy = Math.min(G - 1, ((FACE.xyz[i * 3 + 1] - minY) / (maxY - minY) * G) | 0);
+    cells.add(gy * G + gx);
+  }
+  const area = cells.size * ((maxX - minX) / G) * ((maxY - minY) / G);
+  SPACING = Math.sqrt(area / Math.min(COUNT, FACE.n));
+}
+
+function buildFaceTextures() {
+  const target = new Float32Array(COUNT * 4);
+  const color = new Float32Array(COUNT * 4);
+  for (let i = 0; i < COUNT; i++) {
+    // Points are pre-shuffled, so the first COUNT points are a uniform sub-sample.
+    // If we have more butterflies than points, wrap around with a little jitter.
+    const j = i % FACE.n;
+    const wrap = Math.floor(i / FACE.n);
+    const jit = wrap ? 0.012 : 0;
+    target[i * 4 + 0] = FACE.xyz[j * 3 + 0] + (Math.random() - 0.5) * jit;
+    target[i * 4 + 1] = FACE.xyz[j * 3 + 1] + (Math.random() - 0.5) * jit;
+    target[i * 4 + 2] = FACE.xyz[j * 3 + 2] + (Math.random() - 0.5) * jit;
+    target[i * 4 + 3] = 1;
+    color[i * 4 + 0] = FACE.rgb[j * 3 + 0] / 255;
+    color[i * 4 + 1] = FACE.rgb[j * 3 + 1] / 255;
+    color[i * 4 + 2] = FACE.rgb[j * 3 + 2] / 255;
+    color[i * 4 + 3] = 1;
+  }
+  const mk = data => {
+    const t = new THREE.DataTexture(data, SIZE, SIZE, THREE.RGBAFormat, THREE.FloatType);
+    t.minFilter = t.magFilter = THREE.NearestFilter;
+    t.needsUpdate = true;
+    return t;
+  };
+  return { target: mk(target), color: mk(color) };
+}
+
+/* ------------------------------------------------------------------ */
+/*  2. Renderer, scene, camera                                         */
+/* ------------------------------------------------------------------ */
+const canvas = document.getElementById('stage');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, alpha: false, powerPreference: 'high-performance' });
+renderer.setPixelRatio(TIER.dpr);
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0714, 1);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.15;
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, innerWidth / innerHeight, 0.1, 50);
+camera.position.set(0, 0, 6);
+
+/* ------------------------------------------------------------------ */
+/*  3. GPGPU simulation — position + velocity live in textures         */
+/* ------------------------------------------------------------------ */
+const NOISE_GLSL = /* glsl */`
+// Simplex noise 3D — Ian McEwan / Ashima Arts (MIT)
+vec3 mod289(vec3 x){ return x - floor(x * (1.0/289.0)) * 289.0; }
+vec4 mod289(vec4 x){ return x - floor(x * (1.0/289.0)) * 289.0; }
+vec4 permute(vec4 x){ return mod289(((x*34.0)+1.0)*x); }
+vec4 taylorInvSqrt(vec4 r){ return 1.79284291400159 - 0.85373472095314 * r; }
+float snoise(vec3 v){
+  const vec2 C = vec2(1.0/6.0, 1.0/3.0);
+  const vec4 D = vec4(0.0, 0.5, 1.0, 2.0);
+  vec3 i  = floor(v + dot(v, C.yyy));
+  vec3 x0 = v - i + dot(i, C.xxx);
+  vec3 g = step(x0.yzx, x0.xyz);
+  vec3 l = 1.0 - g;
+  vec3 i1 = min(g.xyz, l.zxy);
+  vec3 i2 = max(g.xyz, l.zxy);
+  vec3 x1 = x0 - i1 + C.xxx;
+  vec3 x2 = x0 - i2 + C.yyy;
+  vec3 x3 = x0 - D.yyy;
+  i = mod289(i);
+  vec4 p = permute(permute(permute(
+            i.z + vec4(0.0, i1.z, i2.z, 1.0))
+          + i.y + vec4(0.0, i1.y, i2.y, 1.0))
+          + i.x + vec4(0.0, i1.x, i2.x, 1.0));
+  float n_ = 0.142857142857;
+  vec3 ns = n_ * D.wyz - D.xzx;
+  vec4 j = p - 49.0 * floor(p * ns.z * ns.z);
+  vec4 x_ = floor(j * ns.z);
+  vec4 y_ = floor(j - 7.0 * x_);
+  vec4 x = x_ * ns.x + ns.yyyy;
+  vec4 y = y_ * ns.x + ns.yyyy;
+  vec4 h = 1.0 - abs(x) - abs(y);
+  vec4 b0 = vec4(x.xy, y.xy);
+  vec4 b1 = vec4(x.zw, y.zw);
+  vec4 s0 = floor(b0)*2.0 + 1.0;
+  vec4 s1 = floor(b1)*2.0 + 1.0;
+  vec4 sh = -step(h, vec4(0.0));
+  vec4 a0 = b0.xzyw + s0.xzyw*sh.xxyy;
+  vec4 a1 = b1.xzyw + s1.xzyw*sh.zzww;
+  vec3 p0 = vec3(a0.xy, h.x);
+  vec3 p1 = vec3(a0.zw, h.y);
+  vec3 p2 = vec3(a1.xy, h.z);
+  vec3 p3 = vec3(a1.zw, h.w);
+  vec4 norm = taylorInvSqrt(vec4(dot(p0,p0), dot(p1,p1), dot(p2,p2), dot(p3,p3)));
+  p0 *= norm.x; p1 *= norm.y; p2 *= norm.z; p3 *= norm.w;
+  vec4 m = max(0.6 - vec4(dot(x0,x0), dot(x1,x1), dot(x2,x2), dot(x3,x3)), 0.0);
+  m = m * m;
+  return 42.0 * dot(m*m, vec4(dot(p0,x0), dot(p1,x1), dot(p2,x2), dot(p3,x3)));
+}
+
+// Curl of a noise vector potential: divergence-free, so the flow never piles up.
+vec3 curlNoise(vec3 p){
+  const float e = 0.08;
+  const vec3 o2 = vec3(31.4, 17.2, 9.1);
+  const vec3 o3 = vec3(-12.3, 8.7, -25.9);
+  float dP3dy = snoise(p + o3 + vec3(0,e,0)) - snoise(p + o3 - vec3(0,e,0));
+  float dP2dz = snoise(p + o2 + vec3(0,0,e)) - snoise(p + o2 - vec3(0,0,e));
+  float dP1dz = snoise(p      + vec3(0,0,e)) - snoise(p      - vec3(0,0,e));
+  float dP3dx = snoise(p + o3 + vec3(e,0,0)) - snoise(p + o3 - vec3(e,0,0));
+  float dP2dx = snoise(p + o2 + vec3(e,0,0)) - snoise(p + o2 - vec3(e,0,0));
+  float dP1dy = snoise(p      + vec3(0,e,0)) - snoise(p      - vec3(0,e,0));
+  return vec3(dP3dy - dP2dz, dP1dz - dP3dx, dP2dx - dP1dy) / (2.0 * e);
+}
+`;
+
+// Velocity: the heart of the piece. Two behaviours, blended by uSettle.
+const VELOCITY_SHADER = /* glsl */`
+uniform float uTime;
+uniform float uDelta;
+uniform float uSettle;      // 0 = free flock, 1 = hold the face
+uniform float uPointerOn;   // 0..1, how strongly the pointer repels
+uniform vec3  uPointer;     // pointer in world space (on the face plane)
+uniform vec3  uAttractor;   // wandering point the flock loosely follows
+uniform sampler2D uTarget;  // each butterfly's home position on the face
+${NOISE_GLSL}
+
+void main() {
+  vec2 uv = gl_FragCoord.xy / resolution.xy;
+  vec3 pos = texture2D(texturePosition, uv).xyz;
+  vec3 vel = texture2D(textureVelocity, uv).xyz;
+  vec3 target = texture2D(uTarget, uv).xyz;
+  float dt = uDelta;
+  float h = fract(sin(dot(uv, vec2(12.9898, 78.233))) * 43758.5453);
+
+  /* --- A. Flock: curl-noise wind + sampled boids + a wandering attractor --- */
+  vec3 wind = curlNoise(pos * 0.55 + vec3(0.0, uTime * 0.06, uTime * 0.03) + h * 0.02);
+
+  vec3 sep = vec3(0.0), ali = vec3(0.0), coh = vec3(0.0); float n = 0.0;
+  for (int i = 0; i < 12; i++) {
+    // Twelve pseudo-random neighbours from the texture (cheap stand-in for a spatial hash).
+    vec2 ouv = fract(uv + vec2(float(i) * 0.6180339 + 0.137, float(i) * 0.3819660 + 0.291) + h * 0.05);
+    vec3 op = texture2D(texturePosition, ouv).xyz;
+    vec3 ov = texture2D(textureVelocity, ouv).xyz;
+    vec3 d = op - pos; float dist = length(d) + 1e-4;
+    if (dist < 0.9) {
+      float w = 1.0 - dist / 0.9;
+      if (dist < 0.22) sep -= (d / dist) * (1.0 - dist / 0.22);
+      ali += ov * w; coh += d * w; n += w;
+    }
+  }
+  if (n > 0.0) { ali /= n; coh /= n; }
+  vec3 toA = uAttractor - pos; float da = length(toA);
+  vec3 flockAcc = wind * 1.7 + sep * 2.6 + (ali - vel) * 1.1 + coh * 1.0
+                + toA * 0.35 * smoothstep(0.6, 3.5, da);
+  flockAcc -= pos * 0.10 * smoothstep(2.6, 4.8, length(pos));   // soft world bounds
+
+  /* --- B. Settle: a damped spring to the home position; no idle force, so the face comes to a true standstill --- */
+  vec3 toT = target - pos;
+  vec3 seekAcc = toT * 9.0 - vel * 5.0;
+
+  /* --- Pointer: push away and slightly toward the camera; the spring brings them back --- */
+  vec3 dp = pos - uPointer; float dl = length(dp);
+  float rep = uPointerOn * smoothstep(0.62, 0.0, dl);
+  vec3 pointerAcc = (normalize(dp + vec3(0.0, 0.0, 0.35)) * 16.0 + vec3(0.0, 0.0, 5.0)) * rep;
+
+  vec3 acc = mix(flockAcc, seekAcc, uSettle) + pointerAcc;
+  vel += acc * dt;
+
+  float sp = length(vel);
+  float maxS = mix(1.6, 4.5, uSettle);
+  if (sp > maxS) vel *= maxS / sp;
+  float minS = 0.45 * (1.0 - uSettle);       // keep the flock alive, never stalling mid-air
+  if (sp < minS && sp > 1e-5) vel *= minS / sp;
+
+  gl_FragColor = vec4(vel, 1.0);
+}
+`;
+
+const POSITION_SHADER = /* glsl */`
+uniform float uDelta;
+uniform float uSettle;
+void main() {
+  vec2 uv = gl_FragCoord.xy / resolution.xy;
+  vec4 p = texture2D(texturePosition, uv);
+  vec3 v = texture2D(textureVelocity, uv).xyz;
+  p.xyz += v * uDelta;
+  // w carries the wing phase: fast when flying, frozen when settled.
+  // The length(v) term wakes the wings whenever a butterfly is pushed off its perch.
+  p.w = mod(p.w + uDelta * (mix(15.0, 0.0, uSettle) + length(v) * 6.0), 6.2831853);
+  gl_FragColor = p;
+}
+`;
+
+const gpu = new GPUComputationRenderer(SIZE, SIZE, renderer);
+if (!renderer.extensions.has('EXT_color_buffer_float')) gpu.setDataType(THREE.HalfFloatType);
+
+const dtPos = gpu.createTexture();
+const dtVel = gpu.createTexture();
+function seedTextures() {
+  const p = dtPos.image.data, v = dtVel.image.data;
+  for (let i = 0; i < COUNT; i++) {
+    // start scattered in a loose sphere, drifting
+    const r = 2.2 * Math.cbrt(Math.random());
+    const th = Math.random() * Math.PI * 2, ph = Math.acos(2 * Math.random() - 1);
+    p[i * 4 + 0] = r * Math.sin(ph) * Math.cos(th);
+    p[i * 4 + 1] = r * Math.sin(ph) * Math.sin(th) * 0.7;
+    p[i * 4 + 2] = r * Math.cos(ph);
+    p[i * 4 + 3] = Math.random() * Math.PI * 2;
+    v[i * 4 + 0] = (Math.random() - 0.5);
+    v[i * 4 + 1] = (Math.random() - 0.5);
+    v[i * 4 + 2] = (Math.random() - 0.5);
+    v[i * 4 + 3] = 1;
+  }
+}
+seedTextures();
+
+const faceTex = buildFaceTextures();
+const velVar = gpu.addVariable('textureVelocity', VELOCITY_SHADER, dtVel);
+const posVar = gpu.addVariable('texturePosition', POSITION_SHADER, dtPos);
+gpu.setVariableDependencies(velVar, [posVar, velVar]);
+gpu.setVariableDependencies(posVar, [posVar, velVar]);
+
+const velU = velVar.material.uniforms;
+velU.uTime = { value: 0 };
+velU.uDelta = { value: 0 };
+velU.uSettle = { value: 0 };
+velU.uPointerOn = { value: 0 };
+velU.uPointer = { value: new THREE.Vector3(99, 99, 99) };
+velU.uAttractor = { value: new THREE.Vector3() };
+velU.uTarget = { value: faceTex.target };
+const posU = posVar.material.uniforms;
+posU.uDelta = { value: 0 };
+posU.uSettle = { value: 0 };
+
+const gpuError = gpu.init();
+if (gpuError) {
+  document.getElementById('loading').textContent = 'This browser cannot run the simulation: ' + gpuError;
+  throw new Error(gpuError);
+}
+
+/* ------------------------------------------------------------------ */
+/*  4. Butterflies — one instanced mesh, wings + glow chosen per LOD    */
+/* ------------------------------------------------------------------ */
+function wingTexture() {
+  const s = 256, c = document.createElement('canvas'); c.width = c.height = s;
+  const g = c.getContext('2d');
+  g.clearRect(0, 0, s, s);
+  // one wing: body on the left edge, tip on the right
+  const wing = new Path2D();
+  wing.moveTo(6, 122);
+  wing.bezierCurveTo(50, 22, 196, 8, 246, 66);      // forewing leading edge
+  wing.bezierCurveTo(238, 108, 176, 124, 116, 128);  // forewing trailing edge
+  wing.bezierCurveTo(186, 136, 236, 176, 204, 236);  // hindwing outer edge
+  wing.bezierCurveTo(152, 252, 62, 226, 6, 142);     // hindwing to body
+  wing.closePath();
+  const grad = g.createLinearGradient(0, 0, s, 0);
+  grad.addColorStop(0.0, 'rgba(255,255,255,0.98)');
+  grad.addColorStop(0.55, 'rgba(255,246,236,0.78)');
+  grad.addColorStop(1.0, 'rgba(255,236,224,0.5)');
+  g.fillStyle = grad; g.fill(wing);
+  // rim
+  g.lineWidth = 7; g.strokeStyle = 'rgba(60,30,50,0.75)'; g.stroke(wing);
+  // veins
+  g.lineWidth = 2.2; g.strokeStyle = 'rgba(70,40,60,0.45)';
+  for (const [x1, y1, x2, y2] of [[10,128,200,50],[10,128,236,86],[10,128,214,120],[10,132,214,170],[10,134,196,222],[10,136,130,232]]) {
+    g.beginPath(); g.moveTo(x1, y1); g.quadraticCurveTo((x1 + x2) / 2, (y1 + y2) / 2 - 14, x2, y2); g.stroke();
+  }
+  // eye spots
+  const spot = (x, y, r) => {
+    g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.fillStyle = 'rgba(40,20,50,0.6)'; g.fill();
+    g.beginPath(); g.arc(x, y, r * 0.55, 0, Math.PI * 2); g.fillStyle = 'rgba(255,255,255,0.9)'; g.fill();
+  };
+  spot(178, 62, 15); spot(166, 190, 12);
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+function glowTexture() {
+  const s = 64, c = document.createElement('canvas'); c.width = c.height = s;
+  const g = c.getContext('2d');
+  const grad = g.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, s / 2);
+  grad.addColorStop(0, 'rgba(255,255,255,1)');
+  grad.addColorStop(0.35, 'rgba(255,255,255,0.55)');
+  grad.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = grad; g.fillRect(0, 0, s, s);
+  return new THREE.CanvasTexture(c);
+}
+
+function butterflyGeometry() {
+  // Two wings, each a 2x2-segment grid so they can cup slightly. Local frame:
+  // x = wingspan, y = forward (head), z = up.
+  const HALF = 1.0, H = 1.1, NX = 2, NY = 2;
+  const pos = [], uv = [], idx = [];
+  for (const side of [-1, 1]) {
+    const base = pos.length / 3;
+    for (let j = 0; j <= NY; j++) for (let i = 0; i <= NX; i++) {
+      const u = i / NX, v = j / NY;
+      pos.push(side * u * HALF, (v - 0.5) * H, 0);
+      uv.push(u, v);
+    }
+    for (let j = 0; j < NY; j++) for (let i = 0; i < NX; i++) {
+      const a = base + j * (NX + 1) + i, b = a + 1, c = a + NX + 1, d = c + 1;
+      if (side > 0) idx.push(a, b, c, b, d, c); else idx.push(a, c, b, b, c, d);
+    }
+  }
+  const geo = new THREE.InstancedBufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  geo.setIndex(idx);
+  // `reference` = which texel of the simulation this instance reads
+  const ref = new Float32Array(COUNT * 2);
+  for (let i = 0; i < COUNT; i++) {
+    ref[i * 2] = ((i % SIZE) + 0.5) / SIZE;
+    ref[i * 2 + 1] = (Math.floor(i / SIZE) + 0.5) / SIZE;
+  }
+  geo.setAttribute('reference', new THREE.InstancedBufferAttribute(ref, 2));
+  geo.instanceCount = COUNT;
+  geo.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 12);
+  return geo;
+}
+
+const BUTTERFLY_VERT = /* glsl */`
+attribute vec2 reference;
+uniform sampler2D texturePosition;
+uniform sampler2D textureVelocity;
+uniform sampler2D uColor;
+uniform float uTime, uSettle, uScale, uGlowSize, uLodNear, uLodFar;
+varying vec2 vUv;
+varying vec2 vGuv;
+varying vec3 vColor;
+varying float vLod;
+varying float vShade;
+
+vec3 hsv2rgb(vec3 c){
+  vec3 p = abs(fract(c.xxx + vec3(0.0, 2.0/3.0, 1.0/3.0)) * 6.0 - 3.0);
+  return c.z * mix(vec3(1.0), clamp(p - 1.0, 0.0, 1.0), c.y);
+}
+
+void main() {
+  vec4 pT = texture2D(texturePosition, reference);
+  vec3 pos = pT.xyz; float phase = pT.w;
+  vec3 vel = texture2D(textureVelocity, reference).xyz;
+  vec3 faceCol = texture2D(uColor, reference).rgb;
+  float h  = fract(sin(dot(reference, vec2(12.9898, 78.233))) * 43758.5453);
+  float h2 = fract(h * 7.31 + 0.17);
+
+  /* orientation: follow velocity while flying; at rest face the camera with a small random yaw */
+  float sp = length(vel);
+  vec3 velDir = vel / max(sp, 1e-4);
+  float yaw = (h - 0.5) * 0.9;
+  vec3 restDir = vec3(sin(yaw), cos(yaw), 0.0);
+  float moving = smoothstep(0.05, 0.7, sp);
+  vec3 f = normalize(mix(restDir, velDir, mix(1.0, moving, uSettle)) + vec3(1e-4, 0.0, 0.0));
+  vec3 upHint = abs(f.z) > 0.97 ? vec3(0.0, 1.0, 0.0) : vec3(0.0, 0.0, 1.0);
+  vec3 r = normalize(cross(f, upHint));
+  vec3 u = cross(r, f);
+
+  /* wing flap: rotate each wing about the body axis; both rise together */
+  float amp = mix(1.05, 0.32, uSettle);
+  float a = sin(phase) * amp + 0.18;
+  float ca = cos(a), sa = sin(a);
+  vec3 local = vec3(position.x * ca, position.y, abs(position.x) * sa);
+  // wings are sized to the settled cluster gap; in flight let them be fuller
+  float scale = uScale * (0.75 + 0.5 * h2) * mix(1.7, 0.72, uSettle);
+  vec3 world = pos + (r * local.x + f * local.y + u * local.z) * scale;
+
+  /* LOD: near = wings, far = a soft billboard glow. Mixed in view space. */
+  vec4 mvC = modelViewMatrix * vec4(pos, 1.0);
+  float dCam = length(mvC.xyz);
+  float lod = smoothstep(uLodNear, uLodFar, dCam);
+  vec4 mvWing = modelViewMatrix * vec4(world, 1.0);
+  vec2 bb = vec2(position.x, position.y / 0.55);   // both wings together form a square
+  vec4 mvGlow = mvC + vec4(bb * uGlowSize * (0.8 + 0.4 * h2) * (0.7 + 0.15 * dCam), 0.0, 0.0);
+  vec4 mv = mix(mvWing, mvGlow, lod);
+  gl_Position = projectionMatrix * mv;
+
+  /* colour: pastel rainbow in flight, the portrait's own colour at rest, with a slow iridescent drift */
+  vec3 flockCol = hsv2rgb(vec3(h, 0.55, 1.0));
+  vec3 drift = hsv2rgb(vec3(fract(h + uTime * 0.02), 0.5, 1.0));
+  // keep the portrait colour inside 0..1 so clusters don't clip to white,
+  // with a touch more iridescent variety between neighbouring dots
+  vec3 rest = mix(faceCol, drift, 0.12);
+  vColor = mix(flockCol, rest, uSettle);
+  vShade = mix(0.55, 1.0, ca * 0.5 + 0.5);
+  vLod = lod;
+  vUv = uv;
+  vGuv = bb * 0.5 + 0.5;
+}
+`;
+
+const BUTTERFLY_FRAG = /* glsl */`
+uniform sampler2D uWing;
+uniform sampler2D uGlow;
+uniform float uIntensity;
+varying vec2 vUv;
+varying vec2 vGuv;
+varying vec3 vColor;
+varying float vLod;
+varying float vShade;
+void main() {
+  vec4 w = texture2D(uWing, vUv);
+  float g = texture2D(uGlow, vGuv).a;
+  float a = mix(w.a, g, vLod);
+  if (a < 0.02) discard;
+  vec3 col = mix(vColor * w.rgb * vShade, vColor, vLod);
+  gl_FragColor = vec4(col * uIntensity, a);
+#if DIRECT_OUTPUT
+  // no post-processing pass, so tone-map and convert to sRGB here
+  #include <tonemapping_fragment>
+  #include <colorspace_fragment>
+#endif
+}
+`;
+
+const butterflyMat = new THREE.ShaderMaterial({
+  uniforms: {
+    texturePosition: { value: null },
+    textureVelocity: { value: null },
+    uColor: { value: faceTex.color },
+    uWing: { value: wingTexture() },
+    uGlow: { value: glowTexture() },
+    uTime: { value: 0 },
+    uSettle: { value: 0 },
+    uScale: { value: SPACING * 0.95 },     // half wingspan
+    uGlowSize: { value: SPACING * 1.1 },
+    uLodNear: { value: 4.2 },
+    uLodFar: { value: 7.5 },
+    uIntensity: { value: 1.0 },
+  },
+  defines: { DIRECT_OUTPUT: TIER.bloom ? 0 : 1 },
+  vertexShader: BUTTERFLY_VERT,
+  fragmentShader: BUTTERFLY_FRAG,
+  transparent: true,
+  depthWrite: false,
+  depthTest: false,
+  blending: THREE.AdditiveBlending,
+  side: THREE.DoubleSide,
+});
+const swarm = new THREE.Mesh(butterflyGeometry(), butterflyMat);
+swarm.frustumCulled = false;
+scene.add(swarm);
+
+/* ------------------------------------------------------------------ */
+/*  5. Post-processing (desktop only): a little bloom for the dream    */
+/* ------------------------------------------------------------------ */
+let composer = null, bloomPass = null;
+if (TIER.bloom) {
+  composer = new EffectComposer(renderer);
+  composer.addPass(new RenderPass(scene, camera));
+  bloomPass = new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.45, 0.65, 0.5);
+  composer.addPass(bloomPass);
+  composer.addPass(new OutputPass());
+}
+
+/* ------------------------------------------------------------------ */
+/*  6. Pointer → world position on the face plane                      */
+/* ------------------------------------------------------------------ */
+const pointerNdc = new THREE.Vector2(9, 9);
+let pointerActive = false;
+const raycaster = new THREE.Raycaster();
+const facePlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), -0.05);
+const pointerWorld = new THREE.Vector3(99, 99, 99);
+let pointerOn = 0;
+
+function setPointer(x, y) {
+  pointerNdc.set((x / innerWidth) * 2 - 1, -(y / innerHeight) * 2 + 1);
+  pointerActive = true;
+}
+addEventListener('pointermove', e => setPointer(e.clientX, e.clientY), { passive: true });
+addEventListener('pointerdown', e => setPointer(e.clientX, e.clientY), { passive: true });
+addEventListener('pointerup', () => { if (navigator.maxTouchPoints > 0) pointerActive = false; });
+addEventListener('pointercancel', () => { pointerActive = false; });
+document.addEventListener('pointerleave', () => { pointerActive = false; });
+
+/* ------------------------------------------------------------------ */
+/*  7. Timeline, camera and the frame loop                             */
+/* ------------------------------------------------------------------ */
+const T_FLOCK = reduceMotion ? 0.6 : 4.5;    // seconds of free flight
+const T_SETTLE = reduceMotion ? 2.5 : 7.0;   // seconds to gather into the face
+const clock = new THREE.Clock();
+let t = 0, settle = 0, camBlend = 0;
+let frames = 0, fpsAccum = 0, fps = 0;
+const attractor = new THREE.Vector3();
+const camFlock = new THREE.Vector3(), camRest = new THREE.Vector3(), camTarget = new THREE.Vector3();
+const lookAt = new THREE.Vector3();
+const statsEl = document.getElementById('stats');
+if (params.get('stats') === '1') statsEl.style.display = 'block';
+
+const smootherstep = (a, b, x) => { x = Math.min(1, Math.max(0, (x - a) / (b - a))); return x * x * x * (x * (x * 6 - 15) + 10); };
+
+function replay() {
+  t = 0; settle = 0;
+  document.body.classList.remove('settled');
+}
+document.getElementById('replay').addEventListener('click', replay);
+addEventListener('keydown', e => { if (e.key === 'r' || e.key === 'R') replay(); });
+
+function frame() {
+  requestAnimationFrame(frame);
+  if (document.hidden) return;
+  let dt = clock.getDelta();
+  if (dt > 1 / 30) dt = 1 / 30;             // never let a hitch explode the spring
+  t += dt;
+
+  settle = smootherstep(T_FLOCK, T_FLOCK + T_SETTLE, t);
+  camBlend = smootherstep(T_FLOCK + 1.5, T_FLOCK + T_SETTLE + 1.0, t);
+  if (settle > 0.999 && !document.body.classList.contains('settled')) document.body.classList.add('settled');
+
+  // the flock loosely chases a slow lissajous wander
+  attractor.set(Math.sin(t * 0.5) * 1.6, Math.sin(t * 0.37 + 1.0) * 0.9, Math.sin(t * 0.29) * 1.2);
+
+  // pointer: project onto the face plane, ease strength in/out
+  const wantOn = pointerActive && settle > 0.6 ? 1 : 0;
+  pointerOn += (wantOn - pointerOn) * Math.min(1, dt * 6);
+  raycaster.setFromCamera(pointerNdc, camera);
+  if (raycaster.ray.intersectPlane(facePlane, pointerWorld) === null) pointerWorld.set(99, 99, 99);
+
+  // simulation step
+  velU.uTime.value = t; velU.uDelta.value = dt; velU.uSettle.value = settle;
+  velU.uPointerOn.value = pointerOn; velU.uPointer.value.copy(pointerWorld);
+  velU.uAttractor.value.copy(attractor);
+  posU.uDelta.value = dt; posU.uSettle.value = settle;
+  gpu.compute();
+
+  // camera: a slow orbit while they fly, then dead still in front of the face (pointer adds a touch of parallax)
+  camFlock.set(Math.sin(t * 0.12) * 5.8, 0.6 + Math.sin(t * 0.09) * 1.1, Math.cos(t * 0.12) * 5.8);
+  camRest.set(pointerNdc.x * 0.2 * (pointerActive ? 1 : 0),
+              0.05 + (pointerActive ? pointerNdc.y * 0.12 : 0),
+              3.45);
+  camTarget.lerpVectors(camFlock, camRest, camBlend);
+  camera.position.lerp(camTarget, Math.min(1, dt * 2.0));
+  lookAt.copy(attractor).multiplyScalar(0.25 * (1 - camBlend));
+  camera.lookAt(lookAt);
+
+  // draw
+  const bu = butterflyMat.uniforms;
+  bu.texturePosition.value = gpu.getCurrentRenderTarget(posVar).texture;
+  bu.textureVelocity.value = gpu.getCurrentRenderTarget(velVar).texture;
+  bu.uTime.value = t; bu.uSettle.value = settle;
+  // dial the additive glow down as the face forms: dreamy in flight,
+  // crisp distinct dots at rest (clusters overlap, so full intensity clips white)
+  bu.uIntensity.value = (TIER.bloom ? 1.0 : 1.25) * (1.0 - 0.55 * settle);
+  if (bloomPass) bloomPass.strength = 0.45 * (1.0 - 0.75 * settle);
+  if (composer) composer.render(); else renderer.render(scene, camera);
+
+  // housekeeping
+  if (frames === 1) document.getElementById('loading').classList.add('gone');
+  frames++; fpsAccum += dt;
+  if (fpsAccum >= 0.5) { fps = Math.round(frames / fpsAccum); frames = 0; fpsAccum = 0;
+    if (statsEl.style.display !== 'none') statsEl.textContent = `${fps} fps\n${COUNT.toLocaleString()} butterflies (${SIZE}²)\nsettle ${settle.toFixed(2)}  bloom ${TIER.bloom ? 'on' : 'off'}  dpr ${TIER.dpr}`; }
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  if (composer) { composer.setSize(innerWidth, innerHeight); bloomPass.resolution.set(innerWidth, innerHeight); }
+});
+
+document.getElementById('count').textContent = COUNT.toLocaleString();
+frames = 0;
+frame();
+
+// Everything you might want to poke at from the console while studying:
+window.SWARM = { renderer, scene, camera, gpu, velU, posU, butterflyMat, TIER, replay, get settle() { return settle; } };
+</script>
+</body>
+</html>

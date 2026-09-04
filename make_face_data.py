@@ -203,7 +203,12 @@ def feature_weight(gray, mask, args, face=None):
 
     Face-aware: the tone range is measured on the FACE, not the whole person —
     otherwise a white shirt eats the top of the range and the face goes flat.
-    Density outside the face tapers to --body so clothing stays a whisper."""
+    Density outside the face tapers to --body so clothing stays a whisper.
+
+    Returns (weight, tone): weight drives WHERE dots land; tone (the
+    normalised 0..1 brightness, pre-gamma) is baked per point so the site
+    can drive dot SIZE and duotone colour from it — classic halftone
+    modulates size with tone, not just spacing."""
     inside = mask > 0
     scope = inside
     emphasis = np.ones_like(gray)
@@ -235,7 +240,7 @@ def feature_weight(gray, mask, args, face=None):
         dist = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
         rim = ((dist > 0) & (dist < 6)).astype(np.float32) * args.rim
         w = np.maximum(w, rim)
-    return w * inside
+    return w * inside, tone * inside
 
 
 # ----------------------------------------------------------------------
@@ -363,8 +368,10 @@ def apply_edits(weight, edits_path):
     a = im[:, :, 3].astype(np.float32) / 255.0
     g = im[:, :, 1].astype(np.float32) / 255.0 * a       # add strokes
     r = im[:, :, 2].astype(np.float32) / 255.0 * a       # erase strokes (BGR order)
+    # dodge & burn semantics: stroke opacity IS the strength, so a light pass
+    # gently thickens/thins and a full-strength pass forces/erases outright
     weight = np.maximum(weight, g * 0.85)
-    weight[r > 0.3] = 0.0
+    weight = weight * (1.0 - r)
     return weight
 
 
@@ -395,7 +402,7 @@ def bake(photo, **params):
     # whole-mask tone percentiles and uniform emphasis
     mask = head_mask(rgb, alpha, a)
     clean, gray = preprocess(rgb, a)
-    weight = feature_weight(gray, mask, a, face)
+    weight, tonemap = feature_weight(gray, mask, a, face)
     if a.edits:
         weight = apply_edits(weight, a.edits)
     depth = relief_depth(np.clip(gray, 0, 1), mask, a.depth)
@@ -404,6 +411,7 @@ def bake(photo, **params):
     px, py = pts[:, 0], pts[:, 1]
     col = lift_saturation(sample_bilinear(clean, px, py) / 255.0)
     z = sample_bilinear(depth, px, py)
+    tone_pts = np.clip(sample_bilinear(tonemap, px, py), 0, 1)
 
     # normalise: mask bbox height -> 2.0 scene units, centred at the origin
     ys, xs = np.where(mask > 0)
@@ -420,6 +428,9 @@ def bake(photo, **params):
         'aspect': float(rgb.shape[1] / rgb.shape[0]),
         'xyz': base64.b64encode(q.tobytes()).decode(),
         'rgb': base64.b64encode(c8.tobytes()).decode(),
+        # per-point tone (0..255): drives dot size and duotone colour on the
+        # site; older face-data files without it fall back to rgb luminance
+        'tone': base64.b64encode(np.round(tone_pts * 255).astype(np.uint8).tobytes()).decode(),
     }
 
     # preview: mask contour on photo | dots | depth

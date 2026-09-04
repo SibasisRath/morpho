@@ -195,7 +195,9 @@ function decodeFace() {
     const k = i % 3;
     xyz[i] = d.min[k] + (q[i] / 65535) * (d.max[k] - d.min[k]);
   }
-  return { n, xyz, rgb: c };
+  // per-point tone drives dot size + duotone colour; old bakes without the
+  // channel fall back to each dot's own luminance — a close proxy
+  return { n, xyz, rgb: c, tone: d.tone ? bytes(d.tone) : null };
 }
 const FACE = decodeFace();
 
@@ -232,10 +234,12 @@ function buildFaceTextures() {
     target[i * 4 + 1] = FACE.xyz[j * 3 + 1] + (Math.random() - 0.5) * jit;
     target[i * 4 + 2] = FACE.xyz[j * 3 + 2] + (Math.random() - 0.5) * jit;
     target[i * 4 + 3] = 1;
-    color[i * 4 + 0] = FACE.rgb[j * 3 + 0] / 255;
-    color[i * 4 + 1] = FACE.rgb[j * 3 + 1] / 255;
-    color[i * 4 + 2] = FACE.rgb[j * 3 + 2] / 255;
-    color[i * 4 + 3] = 1;
+    const r = FACE.rgb[j * 3 + 0] / 255, g = FACE.rgb[j * 3 + 1] / 255, b = FACE.rgb[j * 3 + 2] / 255;
+    color[i * 4 + 0] = r;
+    color[i * 4 + 1] = g;
+    color[i * 4 + 2] = b;
+    // alpha carries the point's tone (see decodeFace)
+    color[i * 4 + 3] = FACE.tone ? FACE.tone[j] / 255 : (0.2126 * r + 0.7152 * g + 0.0722 * b);
   }
   const mk = data => {
     const t = new THREE.DataTexture(data, SIZE, SIZE, THREE.RGBAFormat, THREE.FloatType);
@@ -541,10 +545,12 @@ uniform sampler2D textureVelocity;
 uniform sampler2D uColor;
 uniform float uTime, uSettle, uScale, uGlowSize, uLodNear, uLodFar;
 uniform float uSizeMul;     // live size multiplier (tuning studio)
-uniform float uColorMode;   // 0 = portrait colours, 1 = single tint, 2 = rainbow
+uniform float uColorMode;   // 0 portrait, 1 single tint, 2 rainbow, 3 duotone
 uniform float uDrift;       // iridescent drift amount at rest
 uniform float uShape;       // 0 = butterflies, 1 = dots
-uniform vec3 uTint;
+uniform float uToneSize;    // 0..1: how strongly tone drives dot size (halftone richness)
+uniform vec3 uTint;         // mono tint / duotone shadow colour
+uniform vec3 uTint2;        // duotone highlight colour
 varying vec2 vUv;
 varying vec2 vGuv;
 varying vec3 vColor;
@@ -560,7 +566,9 @@ void main() {
   vec4 pT = texture2D(texturePosition, reference);
   vec3 pos = pT.xyz; float phase = pT.w;
   vec3 vel = texture2D(textureVelocity, reference).xyz;
-  vec3 faceCol = texture2D(uColor, reference).rgb;
+  vec4 colT = texture2D(uColor, reference);
+  vec3 faceCol = colT.rgb;
+  float tone = colT.a;        // the point's baked 0..1 brightness
   float h  = fract(sin(dot(reference, vec2(12.9898, 78.233))) * 43758.5453);
   float h2 = fract(h * 7.31 + 0.17);
 
@@ -580,8 +588,10 @@ void main() {
   float a = sin(phase) * amp + 0.18;
   float ca = cos(a), sa = sin(a);
   vec3 local = vec3(position.x * ca, position.y, abs(position.x) * sa);
-  // wings are sized to the settled cluster gap; in flight let them be fuller
-  float scale = uScale * uSizeMul * (0.75 + 0.5 * h2) * mix(1.7, 0.72, uSettle);
+  // wings are sized to the settled cluster gap; in flight let them be fuller.
+  // szTone: classic halftone — bright points grow, dim points shrink
+  float szTone = mix(1.0 - 0.6 * uToneSize, 1.0 + 0.35 * uToneSize, tone);
+  float scale = uScale * uSizeMul * szTone * (0.75 + 0.5 * h2) * mix(1.7, 0.72, uSettle);
   vec3 world = pos + (r * local.x + f * local.y + u * local.z) * scale;
 
   /* LOD: near = wings, far = a soft billboard glow. Mixed in view space.
@@ -593,19 +603,22 @@ void main() {
   vec4 mvWing = modelViewMatrix * vec4(world, 1.0);
   vec2 bb = vec2(position.x, position.y / 0.55);   // both wings together form a square
   // dots also breathe with the timeline: fuller in flight, tighter at rest
-  vec4 mvGlow = mvC + vec4(bb * uGlowSize * uSizeMul * (0.8 + 0.4 * h2) * (0.7 + 0.15 * dCam) * mix(1.3, 0.75, uSettle), 0.0, 0.0);
+  vec4 mvGlow = mvC + vec4(bb * uGlowSize * uSizeMul * szTone * (0.8 + 0.4 * h2) * (0.7 + 0.15 * dCam) * mix(1.3, 0.75, uSettle), 0.0, 0.0);
   vec4 mv = mix(mvWing, mvGlow, lod);
   gl_Position = projectionMatrix * mv;
 
-  /* colour: three modes (uColorMode). 0 portrait — pastel rainbow in flight,
+  /* colour: four modes (uColorMode). 0 portrait — pastel rainbow in flight,
      the photo's own colour at rest (kept inside 0..1 so clusters don't clip
      to white) with an iridescent drift; 1 mono — everything in one tint;
-     2 rainbow — every butterfly keeps its own hue even at rest */
+     2 rainbow — every butterfly keeps its own hue even at rest;
+     3 duotone — tone blends shadow colour (uTint) to highlight (uTint2),
+     even in flight, so the portrait's structure ghosts through the swarm */
   vec3 drift = hsv2rgb(vec3(fract(h + uTime * 0.02), 0.5, 1.0));
   vec3 flockCol, rest;
   if (uColorMode < 0.5)      { flockCol = hsv2rgb(vec3(h, 0.55, 1.0)); rest = mix(faceCol, drift, uDrift); }
   else if (uColorMode < 1.5) { flockCol = uTint;                       rest = uTint; }
-  else                       { flockCol = hsv2rgb(vec3(h, 0.55, 1.0)); rest = hsv2rgb(vec3(h, 0.75, 1.0)); }
+  else if (uColorMode < 2.5) { flockCol = hsv2rgb(vec3(h, 0.55, 1.0)); rest = hsv2rgb(vec3(h, 0.75, 1.0)); }
+  else                       { flockCol = mix(uTint, uTint2, tone);    rest = mix(uTint, uTint2, tone); }
   vColor = mix(flockCol, rest, uSettle);
   vShade = mix(0.55, 1.0, ca * 0.5 + 0.5);
   vLod = lod;
@@ -619,6 +632,7 @@ uniform sampler2D uWing;
 uniform sampler2D uGlow;
 uniform float uIntensity;
 uniform float uShape;       // 0 = butterflies, 1 = dots
+uniform float uHalo;        // soft glow ring around each dot (0 = hard ink edge)
 varying vec2 vUv;
 varying vec2 vGuv;
 varying vec3 vColor;
@@ -627,10 +641,11 @@ varying float vShade;
 void main() {
   vec4 w = texture2D(uWing, vUv);
   float g = texture2D(uGlow, vGuv).a;
-  // dot mode: swap the soft glow falloff for a crisp disc with a hint of halo
+  // dot mode: swap the soft glow falloff for a crisp disc; uHalo adds back a
+  // whisper of glow (dream style) or none at all (ink style)
   if (uShape > 0.5) {
     float d = length(vGuv - 0.5);
-    g = smoothstep(0.42, 0.34, d) + 0.25 * g;
+    g = smoothstep(0.42, 0.34, d) + uHalo * g;
   }
   float a = mix(w.a, g, vLod);
   if (a < 0.02) discard;
@@ -662,7 +677,10 @@ const butterflyMat = new THREE.ShaderMaterial({
     uColorMode: { value: 0 },
     uDrift: { value: 0.12 },
     uShape: { value: 1 },   // dots by default for now; butterflies via configure({shape:'butterfly'})
+    uToneSize: { value: 0.5 },
+    uHalo: { value: 0.25 },
     uTint: { value: new THREE.Color('#ffd9a0') },
+    uTint2: { value: new THREE.Color('#8a5cff') },
   },
   defines: { DIRECT_OUTPUT: TIER.bloom ? 0 : 1 },
   vertexShader: BUTTERFLY_VERT,
@@ -716,7 +734,7 @@ const T_FLOCK = reduceMotion ? 0.6 : 4.5;    // seconds of free flight
 const T_SETTLE = reduceMotion ? 2.5 : 7.0;   // seconds to gather into the face
 // Live-tunable values (see section 8's configure()); declared before the
 // frame loop starts because frame() reads them from its very first tick.
-const CONFIG = { speed: 1, intensity: 1, bloomStrength: 0.45, hazeColor: 'rgba(44,26,78,0.9)' };
+const CONFIG = { speed: 1, intensity: 1, bloomStrength: 0.45, hazeColor: 'rgba(44,26,78,0.9)', blendNormal: false };
 let recCompose = null;   // video compositor hook (8b); frame() checks it every tick
 const clock = new THREE.Clock();
 let t = 0, settle = 0, camBlend = 0;
@@ -779,9 +797,11 @@ function frame() {
   bu.texturePosition.value = gpu.getCurrentRenderTarget(posVar).texture;
   bu.textureVelocity.value = gpu.getCurrentRenderTarget(velVar).texture;
   bu.uTime.value = t; bu.uSettle.value = settle;
-  // dial the additive glow down as the face forms: dreamy in flight,
-  // crisp distinct dots at rest (clusters overlap, so full intensity clips white)
-  bu.uIntensity.value = (TIER.bloom ? 1.0 : 1.25) * CONFIG.intensity * (1.0 - 0.55 * settle);
+  // additive blending: dial the glow down as the face forms so overlapping
+  // dots don't sum past white. normal ("ink") blending covers instead of
+  // adding, so it keeps full intensity throughout.
+  const settleFade = CONFIG.blendNormal ? 1.0 : (1.0 - 0.55 * settle);
+  bu.uIntensity.value = (TIER.bloom ? 1.0 : 1.25) * CONFIG.intensity * settleFade;
   if (bloomPass) bloomPass.strength = CONFIG.bloomStrength * (1.0 - 0.75 * settle);
   if (composer) composer.render(); else renderer.render(scene, camera);
   if (recCompose) recCompose();   // video compositor (8b) — must run right after render
@@ -887,9 +907,17 @@ function configure(c) {
   if (c.bloomStrength !== undefined) CONFIG.bloomStrength = +c.bloomStrength; // glow amount (bloom tier only)
   if (c.size       !== undefined) bu.uSizeMul.value = +c.size;             // wing size multiplier
   if (c.drift      !== undefined) bu.uDrift.value = +c.drift;              // iridescent shimmer at rest
-  if (c.colorMode  !== undefined) bu.uColorMode.value =                    // 'portrait' | 'mono' | 'rainbow'
-      c.colorMode === 'mono' ? 1 : c.colorMode === 'rainbow' ? 2 : 0;
-  if (c.tint       !== undefined) bu.uTint.value.set(c.tint);              // colour for 'mono' mode
+  if (c.colorMode  !== undefined) bu.uColorMode.value =                    // 'portrait' | 'mono' | 'rainbow' | 'duo'
+      c.colorMode === 'mono' ? 1 : c.colorMode === 'rainbow' ? 2 : c.colorMode === 'duo' ? 3 : 0;
+  if (c.tint       !== undefined) bu.uTint.value.set(c.tint);              // mono tint / duotone shadow
+  if (c.tint2      !== undefined) bu.uTint2.value.set(c.tint2);            // duotone highlight
+  if (c.toneSize   !== undefined) bu.uToneSize.value = +c.toneSize;        // halftone size-by-tone strength
+  if (c.halo       !== undefined) bu.uHalo.value = +c.halo;                // dot glow ring; 0 = hard ink edge
+  if (c.blend      !== undefined) {                                        // 'additive' (dream) | 'normal' (ink)
+    CONFIG.blendNormal = c.blend === 'normal';
+    butterflyMat.blending = CONFIG.blendNormal ? THREE.NormalBlending : THREE.AdditiveBlending;
+    butterflyMat.needsUpdate = true;
+  }
   if (c.shape      !== undefined) bu.uShape.value = c.shape === 'dot' ? 1 : 0;   // 'dot' | 'butterfly'
   if (c.bg         !== undefined) document.documentElement.style.setProperty('--dusk', c.bg);
   if (c.bgDeep     !== undefined) document.documentElement.style.setProperty('--dusk-deep', c.bgDeep);

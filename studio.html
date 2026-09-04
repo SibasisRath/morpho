@@ -121,13 +121,30 @@
     </div>
     <label title="Diameter of the correction brush, in preview pixels.">
       <span>brush size</span><input type="range" id="brushSize" min="4" max="60" value="18" /><output>18</output></label>
+    <label title="Dodge & burn strength: 1 = force/erase outright, lower = gently thicken or thin the dots where you paint.">
+      <span>strength</span><input type="range" id="brushStrength" min="0.2" max="1" step="0.05" value="0.9" /><output>0.9</output></label>
     <canvas id="editCanvas" title="Paint corrections over the baked dots. Green adds, red erases."></canvas>
     <p class="hint">Strokes apply on the next Bake. Unpainted areas re-bake identically (fixed seed), so you're patching, not re-rolling.</p>
   </div>
 
   <h2>Look — live</h2>
+  <div class="row">
+    <button id="styleInk" title="Hard opaque white dots on near-black — the classic halftone-print look. Sets Look controls live AND the bake sliders (edge 0, relief 0, steeper tone curve) — hit Bake after to fully apply.">✒️ Ink style</button>
+    <button id="styleDream" title="The soft luminous look: additive glow, bloom, portrait colours. Restores the default Look and bake sliders — hit Bake after to fully apply.">🌫 Dream style</button>
+  </div>
+  <label title="How overlapping dots combine. additive = light that sums into glow (dream); solid = ink that covers, dots stay countable however dense (ink).">
+    <span>blending</span>
+    <select id="blend">
+      <option value="additive" selected>additive (glow)</option>
+      <option value="normal">solid (ink)</option>
+    </select>
+  </label>
+  <label title="Soft glow ring around each dot. 0 = hard printed edge — essential for the ink look.">
+    <span>dot halo</span><input type="range" data-c="halo" min="0" max="0.5" step="0.05" value="0.25" /><output>0.25</output></label>
   <label title="Particle size multiplier. Smaller = crisper halftone; bigger = softer, more merged.">
     <span>size</span><input type="range" data-c="size" min="0.3" max="3" step="0.05" value="1" /><output>1</output></label>
+  <label title="Classic halftone richness: bright points grow, dim points shrink. 0 = uniform size (needs a bake made after tone support; older bakes use each dot's luminance).">
+    <span>size by tone</span><input type="range" data-c="toneSize" min="0" max="1" step="0.05" value="0.5" /><output>0.5</output></label>
   <label title="Animation time scale: 0.2 dreamy slow-motion … 3 frantic. Affects flight, settling and scatter alike.">
     <span>speed</span><input type="range" data-c="speed" min="0.2" max="3" step="0.05" value="1" /><output>1</output></label>
   <label title="Bloom halo strength around bright particles. Automatically eases off as the face settles so the portrait stays crisp.">
@@ -143,16 +160,19 @@
       <option value="butterfly">butterflies</option>
     </select>
   </label>
-  <label title="portrait = the photo's own colours at rest; single = everything in one tint; rainbow = every particle keeps its own hue.">
+  <label title="portrait = the photo's own colours at rest; single = everything in one tint; rainbow = every particle keeps its own hue; duotone = tone blends shadow colour → highlight colour, like a two-ink print.">
     <span>colours</span>
     <select id="colorMode">
       <option value="portrait">portrait (photo)</option>
       <option value="mono">single colour</option>
       <option value="rainbow">rainbow</option>
+      <option value="duo">duotone</option>
     </select>
   </label>
-  <label title="The colour used when 'single colour' mode is selected.">
-    <span>tint (mono)</span><input type="color" id="tint" value="#ffd9a0" /><span></span></label>
+  <label title="Single-colour tint; in duotone mode this is the SHADOW colour.">
+    <span>tint / shadow</span><input type="color" id="tint" value="#ffd9a0" /><span></span></label>
+  <label title="Duotone HIGHLIGHT colour — bright areas of the portrait blend toward this.">
+    <span>duo highlight</span><input type="color" id="tint2" value="#8a5cff" /><span></span></label>
   <label title="Page background gradient: first the mid colour behind the face, then the deep colour at the edges.">
     <span>background</span><input type="color" id="bg" value="#1c1030" /><input type="color" id="bgDeep" value="#0a0714" /></label>
   <label title="Simulation size (reloads the frame). More particles = finer portrait but heavier on the GPU. Your baked points should roughly match.">
@@ -268,20 +288,57 @@ document.querySelectorAll('input[type=range]').forEach(r => {
 });
 
 // ---- Look: push live config into the iframe ----
+// Built generically from the data-c controls (like textConfig) so a new
+// slider can never be silently left out of the push, plus the id-based few.
 function look() {
-  return {
-    size: +$('[data-c=size]').value,
-    speed: +$('[data-c=speed]').value,
-    bloomStrength: +$('[data-c=bloomStrength]').value,
-    intensity: +$('[data-c=intensity]').value,
-    drift: +$('[data-c=drift]').value,
-    shape: $('#shape').value,
-    colorMode: $('#colorMode').value,
-    tint: $('#tint').value,
-    bg: $('#bg').value,
-    bgDeep: $('#bgDeep').value,
-  };
+  const l = {};
+  document.querySelectorAll('[data-c]').forEach(el => {
+    l[el.dataset.c] = el.type === 'range' ? +el.value : el.value;
+  });
+  ['shape', 'blend', 'colorMode', 'tint', 'tint2', 'bg', 'bgDeep']
+    .forEach(id => l[id] = $('#' + id).value);
+  return l;
 }
+
+/* Style presets: two poles to tune from. Data-only maps of control values —
+   keys are element ids or data-c / data-p names, so applying is generic.
+   They also set the BAKE sliders (edge/relief/tone curve); the status line
+   reminds you to re-bake for those to land. */
+const STYLES = {
+  ink: {
+    blend: 'normal', halo: 0, bloomStrength: 0, intensity: 1.35, size: 0.85,
+    toneSize: 0.35, drift: 0, colorMode: 'mono', tint: '#ffffff',
+    bg: '#0a0a10', bgDeep: '#000000', shape: 'dot',
+    edge: 0, contrast: 0, tone_gamma: 3.0, floor: 0.2,
+    bloomOn: false,
+    haze: 'rgba(24,20,40,0.35)',            // paper-flat page, no purple glow
+  },
+  dream: {
+    blend: 'additive', halo: 0.25, bloomStrength: 0.45, intensity: 1, size: 1,
+    toneSize: 0.5, drift: 0.12, colorMode: 'portrait', tint: '#ffd9a0',
+    bg: '#1c1030', bgDeep: '#0a0714', shape: 'dot',
+    edge: 0.15, contrast: 1, tone_gamma: 2.6, floor: 0.18,
+    bloomOn: true,
+    haze: 'rgba(44,26,78,0.9)',             // the original dream glow
+  },
+};
+function applyStyle(name) {
+  const style = STYLES[name];
+  const bloomWas = $('#bloomOn').checked;
+  Object.entries(style).forEach(([k, v]) => {
+    const el = document.querySelector(`[data-c=${k}], [data-p=${k}]`) || document.getElementById(k);
+    if (!el) return;
+    if (el.type === 'checkbox') el.checked = v; else el.value = v;
+    if (el.type === 'range') el.nextElementSibling.textContent = el.value;
+  });
+  if ($('#bloomOn').checked !== bloomWas) reloadFrame(); else push({ haze: style.haze });
+  styleHaze = style.haze;                    // re-applied after any frame reload
+  pushHistory();
+  $('#status').className = '';
+  $('#status').textContent = `${name} style applied — hit Bake to apply its dot-placement settings too`;
+}
+$('#styleInk').onclick = () => applyStyle('ink');
+$('#styleDream').onclick = () => applyStyle('dream');
 // text config, built generically from the data-t controls
 function textConfig() {
   const t = {};
@@ -296,7 +353,7 @@ function push(extra = {}) {
   frame.contentWindow.postMessage({ type: 'morpho-config',
     config: { ...look(), text: textConfig(), ...extra } }, '*');
 }
-document.querySelectorAll('[data-c], [data-t], #shape, #colorMode, #tint, #bg, #bgDeep')
+document.querySelectorAll('[data-c], [data-t], #shape, #blend, #colorMode, #tint, #tint2, #bg, #bgDeep')
   .forEach(el => el.addEventListener('input', () => push()));
 
 // preset: write values into the controls, then let the normal paths run
@@ -311,8 +368,9 @@ $('#applyPreset').onclick = () => {
   push();
   pushHistory();
 };
+let styleHaze = null;   // haze colour from the last style preset, if any
 $('#replay').onclick = () => push({ replay: true });
-frame.addEventListener('load', () => setTimeout(() => push(), 400));  // re-apply after any reload
+frame.addEventListener('load', () => setTimeout(() => push(styleHaze ? { haze: styleHaze } : {}), 400));  // re-apply after any reload
 
 // count / bloom-pass changes need a page reload (they rebuild GPU textures)
 function reloadFrame() {
@@ -471,7 +529,8 @@ const editPos = e => {
 };
 function paint(e) {
   const p = editPos(e);
-  strokeCtx.fillStyle = brushMode === 'add' ? 'rgba(0,230,90,0.9)' : 'rgba(255,60,60,0.9)';
+  const s = +$('#brushStrength').value;   // stroke opacity = dodge/burn strength
+  strokeCtx.fillStyle = brushMode === 'add' ? `rgba(0,230,90,${s})` : `rgba(255,60,60,${s})`;
   strokeCtx.beginPath();
   strokeCtx.arc(p.x, p.y, +$('#brushSize').value * editCv.width / 576, 0, 7);
   strokeCtx.fill();

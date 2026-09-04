@@ -117,13 +117,20 @@ def clean_mask(m):
     return cv2.morphologyEx(m, cv2.MORPH_CLOSE, k, iterations=2)
 
 
-def rembg_mask(rgb):
-    """Person segmentation that survives any background (local ONNX model)."""
+def rembg_mask(rgb, subject='face'):
+    """Segmentation that survives any background (local ONNX models):
+    the person-tuned model for faces, the general salient-object one otherwise."""
     from rembg import remove, new_session
-    try:
-        session = new_session('u2net_human_seg')
-    except Exception:
-        session = new_session('u2net')
+    names = ['u2net_human_seg', 'u2net'] if subject == 'face' else ['u2net']
+    session = None
+    for name in names:
+        try:
+            session = new_session(name)
+            break
+        except Exception:
+            continue
+    if session is None:
+        raise RuntimeError('no rembg model available')
     out = remove(cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR), session=session, only_mask=True)
     return np.asarray(out)
 
@@ -155,7 +162,7 @@ def head_mask(rgb, alpha, args):
     if not args.classic_mask:
         try:
             print('mask: rembg person segmentation')
-            return clean_mask(rembg_mask(rgb))
+            return clean_mask(rembg_mask(rgb, getattr(args, 'subject', 'face')))
         except Exception as e:
             print(f'mask: rembg unavailable ({e}); falling back to GrabCut')
     else:
@@ -309,6 +316,9 @@ DEFAULTS = dict(
     points=16000,      # matches the top device tier
     size=768,          # working resolution (long edge)
     seed=7,
+    subject='face',    # 'face' (crop + face-priority) or 'object' (any subject)
+    crop=None,         # manual crop 'x,y,w,h' as 0..1 fractions of the photo; overrides auto crop
+    edits=None,        # painted corrections png: green strokes add dots, red strokes erase
     mask=None,         # external mask png (white = keep)
     classic_mask=False,  # skip rembg, use GrabCut
     no_crop=False,     # skip face-detection crop
@@ -327,6 +337,37 @@ DEFAULTS = dict(
 )
 
 
+def apply_crop(rgb, alpha, spec):
+    """Manual selection: 'x,y,w,h' as 0..1 fractions of the (resized) photo."""
+    try:
+        x, y, w, h = (float(v) for v in spec.split(','))
+    except ValueError:
+        raise SystemExit(f'bad --crop "{spec}", expected x,y,w,h as 0..1 fractions')
+    H, W = rgb.shape[:2]
+    x0 = max(0, int(x * W)); y0 = max(0, int(y * H))
+    x1 = min(W, int((x + w) * W)); y1 = min(H, int((y + h) * H))
+    if x1 - x0 < 32 or y1 - y0 < 32:
+        raise SystemExit('crop selection is too small')
+    return rgb[y0:y1, x0:x1], (alpha[y0:y1, x0:x1] if alpha is not None else None)
+
+
+def apply_edits(weight, edits_path):
+    """Painted corrections over the working image: green strokes force dots in
+    (weight raised to stroke opacity), red strokes erase (weight -> 0).
+    Painting edits the density FIELD, not individual dots — with a fixed seed,
+    unpainted regions re-bake identically."""
+    im = cv2.imread(edits_path, cv2.IMREAD_UNCHANGED)
+    if im is None or im.ndim != 3 or im.shape[2] != 4:
+        raise SystemExit(f'could not read edits png (need RGBA): {edits_path}')
+    im = cv2.resize(im, (weight.shape[1], weight.shape[0]), interpolation=cv2.INTER_LINEAR)
+    a = im[:, :, 3].astype(np.float32) / 255.0
+    g = im[:, :, 1].astype(np.float32) / 255.0 * a       # add strokes
+    r = im[:, :, 2].astype(np.float32) / 255.0 * a       # erase strokes (BGR order)
+    weight = np.maximum(weight, g * 0.85)
+    weight[r > 0.3] = 0.0
+    return weight
+
+
 def bake(photo, **params):
     """Run the full photo -> point-cloud pipeline.
 
@@ -342,14 +383,21 @@ def bake(photo, **params):
 
     rng = np.random.default_rng(int(a.seed))
     rgb, alpha = load_image(a.photo, int(a.size))
+    if a.crop:
+        rgb, alpha = apply_crop(rgb, alpha, a.crop)
     face = None
-    if not a.no_crop:
-        rgb, alpha, face = face_crop(rgb, alpha)
-    elif a.body < 1.0:
-        face = detect_face(rgb)
+    if a.subject == 'face':
+        if not a.no_crop and not a.crop:
+            rgb, alpha, face = face_crop(rgb, alpha)
+        elif a.body < 1.0:
+            face = detect_face(rgb)
+    # object mode: no face logic at all — feature_weight falls back to
+    # whole-mask tone percentiles and uniform emphasis
     mask = head_mask(rgb, alpha, a)
     clean, gray = preprocess(rgb, a)
     weight = feature_weight(gray, mask, a, face)
+    if a.edits:
+        weight = apply_edits(weight, a.edits)
     depth = relief_depth(np.clip(gray, 0, 1), mask, a.depth)
 
     pts = scatter(weight, int(a.points), rng)
@@ -402,6 +450,11 @@ def main():
     ap.add_argument('--out', default='face-data.js')
     ap.add_argument('--preview', default='face-preview.png')
     ap.add_argument('--seed', type=int, default=d['seed'])
+    # subject & framing
+    ap.add_argument('--subject', choices=['face', 'object'], default=d['subject'],
+                    help='face = crop + face-priority weighting; object = any subject (logo, sneaker, bonsai…)')
+    ap.add_argument('--crop', default=d['crop'], help="manual selection 'x,y,w,h' as 0..1 fractions; overrides auto crop")
+    ap.add_argument('--edits', default=d['edits'], help='painted corrections png (green = add dots, red = erase)')
     # masking
     ap.add_argument('--mask', default=d['mask'], help='external mask png (white = keep)')
     ap.add_argument('--classic-mask', action='store_true', help='skip rembg, use GrabCut')

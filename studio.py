@@ -90,6 +90,13 @@ def api_bake():
         return jsonify(error='upload a photo first'), 400
 
     params = _parse_params(request.form)
+    # painted corrections arrive as a file, not a form field
+    if 'edits' in request.files and request.files['edits'].filename:
+        edits_path = WORK / 'edits.png'
+        request.files['edits'].save(edits_path)
+        params['edits'] = str(edits_path)
+    else:
+        params.pop('edits', None)
     try:
         payload, preview = mfd.bake(str(photo), **params)
     except SystemExit as e:                      # pipeline aborts (empty mask etc.)
@@ -110,6 +117,48 @@ def api_preview():
     if 'preview_png' not in state:
         return jsonify(error='no bake yet'), 404
     return send_file(io.BytesIO(state['preview_png']), mimetype='image/png')
+
+
+EMBED_README = """Morpho embed
+============
+This folder is self-contained: index.html (the animation, design pre-applied)
++ face-data.js (the baked portrait). three.js and fonts load from CDNs.
+
+Use it in a site either way:
+  1. Copy the folder in and link to it:   <a href="/morpho/">…</a>
+  2. Or embed it inline as an iframe:
+     <iframe src="/morpho/" style="width:100%;height:100vh;border:0" title="Morpho"></iframe>
+
+Tweak the design later by editing the window.MORPHO_DEFAULTS block at the
+bottom of index.html — every key is documented in the configure() function.
+Replace the portrait by baking a new face-data.js with Morpho Studio.
+"""
+
+
+@app.post('/api/export-embed')
+def api_export_embed():
+    """Build a drop-in embed zip: index.html with the studio's current design
+    injected as window.MORPHO_DEFAULTS (applied at boot, section 8c) plus the
+    latest baked face-data.js and a short README."""
+    import zipfile
+    config = request.get_json(silent=True) or {}
+    html = (ROOT / 'index.html').read_text()
+    anchor = '<script src="face-data.js"></script>'
+    if anchor not in html:
+        return jsonify(error='index.html changed — embed injection anchor missing'), 500
+    inject = ('<script>\n// Design chosen in Morpho Studio — applied at boot (section 8c).\n'
+              f'window.MORPHO_DEFAULTS = {json.dumps(config, indent=2)};\n</script>\n' + anchor)
+    html = html.replace(anchor, inject)
+    js = state.get('js') or (ROOT / 'face-data.js').read_text()
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+        z.writestr('morpho/index.html', html)
+        z.writestr('morpho/face-data.js', js)
+        z.writestr('morpho/README.txt', EMBED_README)
+    buf.seek(0)
+    return send_file(buf, mimetype='application/zip', as_attachment=True,
+                     download_name='morpho-embed.zip')
 
 
 @app.post('/api/save')

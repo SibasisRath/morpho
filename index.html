@@ -41,23 +41,55 @@
   body.settled .ui { opacity: 1; }
   body.settled .ui.replaying { opacity: 0; }
 
+  /* The caption is fully variable-driven so the config API (section 8) can
+     restyle it live: JS only ever writes these custom properties. */
   #caption {
     left: clamp(20px, 4vw, 56px); bottom: clamp(20px, 4vh, 44px);
     max-width: 34ch;
+    --cap-font: "Fraunces", "Iowan Old Style", Georgia, serif;
+    --cap-h-size: 1;          /* heading size multiplier */
+    --cap-b-size: 1;          /* body size multiplier */
+    --cap-style: italic;      /* heading font-style */
+    --cap-rot: 0deg;          /* heading rotation */
+    --cap-sx: 1;              /* heading squeeze/stretch, horizontal */
+    --cap-sy: 1;              /*   …and vertical */
+    --cap-track: -0.01em;     /* heading letter-spacing */
   }
   #caption h1 {
     margin: 0 0 6px;
-    font-weight: 300; font-style: italic;
-    font-size: clamp(30px, 4.2vw, 54px);
-    letter-spacing: -0.01em; line-height: 1;
+    font-family: var(--cap-font);
+    font-weight: 300; font-style: var(--cap-style);
+    font-size: calc(clamp(30px, 4.2vw, 54px) * var(--cap-h-size));
+    letter-spacing: var(--cap-track); line-height: 1.05;
     font-variation-settings: "opsz" 144;
+    transform: rotate(var(--cap-rot)) scale(var(--cap-sx), var(--cap-sy));
+    transform-origin: left bottom;
   }
   #caption p {
-    margin: 0; font-size: clamp(14px, 1.15vw, 16px);
+    margin: 0; font-size: calc(clamp(14px, 1.15vw, 16px) * var(--cap-b-size));
     line-height: 1.55; color: var(--ink-dim);
     font-variation-settings: "opsz" 12;
   }
   #caption p span { color: var(--ink); }
+
+  /* Reveals: how the caption enters once the face has settled. The classes
+     (r-fade default / r-rise / r-blur / r-cascade / r-none) sit on #caption;
+     animations key off body.settled, so Replay re-runs them for free.
+     Container reveals animate #caption itself; the heading's own transform
+     (rotation/stretch) lives on the h1, so the two never fight. */
+  #caption.r-none { transition: none; }
+  body.settled #caption.r-rise   { animation: capRise 1.2s cubic-bezier(.2,.7,.2,1) both; }
+  body.settled #caption.r-blur   { animation: capBlur 1.6s ease-out both; }
+  body.settled #caption.r-cascade p { animation: capRise 1.0s 0.9s cubic-bezier(.2,.7,.2,1) both; }
+  body.settled #caption.r-cascade h1 span {
+    display: inline-block; white-space: pre;
+    animation: capChar 0.7s cubic-bezier(.2,.7,.2,1) both;
+    animation-delay: calc(var(--i) * 60ms);
+  }
+  #caption.r-cascade h1 span { opacity: 0; }
+  @keyframes capRise { from { opacity: 0; translate: 0 26px; } to { opacity: 1; translate: 0 0; } }
+  @keyframes capBlur { from { opacity: 0; filter: blur(14px); } to { opacity: 1; filter: blur(0); } }
+  @keyframes capChar { from { opacity: 0; translate: 0 0.6em; rotate: 6deg; } to { opacity: 1; translate: 0 0; rotate: 0deg; } }
 
   #replay {
     right: clamp(20px, 4vw, 56px); top: clamp(18px, 3vh, 36px);
@@ -82,6 +114,7 @@
   }
   @media (prefers-reduced-motion: reduce) {
     .ui { transition: none; }
+    #caption, #caption h1 span, #caption p { animation: none !important; opacity: 1; }
   }
 </style>
 </head>
@@ -683,7 +716,8 @@ const T_FLOCK = reduceMotion ? 0.6 : 4.5;    // seconds of free flight
 const T_SETTLE = reduceMotion ? 2.5 : 7.0;   // seconds to gather into the face
 // Live-tunable values (see section 8's configure()); declared before the
 // frame loop starts because frame() reads them from its very first tick.
-const CONFIG = { speed: 1, intensity: 1, bloomStrength: 0.45 };
+const CONFIG = { speed: 1, intensity: 1, bloomStrength: 0.45, hazeColor: 'rgba(44,26,78,0.9)' };
+let recCompose = null;   // video compositor hook (8b); frame() checks it every tick
 const clock = new THREE.Clock();
 let t = 0, settle = 0, camBlend = 0;
 let frames = 0, fpsAccum = 0, fps = 0;
@@ -750,6 +784,7 @@ function frame() {
   bu.uIntensity.value = (TIER.bloom ? 1.0 : 1.25) * CONFIG.intensity * (1.0 - 0.55 * settle);
   if (bloomPass) bloomPass.strength = CONFIG.bloomStrength * (1.0 - 0.75 * settle);
   if (composer) composer.render(); else renderer.render(scene, camera);
+  if (recCompose) recCompose();   // video compositor (8b) — must run right after render
 
   // housekeeping
   if (frames === 1) document.getElementById('loading').classList.add('gone');
@@ -776,6 +811,75 @@ window.SWARM = { renderer, scene, camera, gpu, velU, posU, butterflyMat, TIER, r
 /*     from the console: SWARM.configure({ size: 1.5, speed: 0.5 })    */
 /*     (the CONFIG object itself is declared above the frame loop)     */
 /* ------------------------------------------------------------------ */
+
+/* --- 8a. Caption text: content, typography, reveal ----------------- */
+// Curated font set. Each entry: the CSS stack + the Google Fonts sheet to
+// lazy-load the first time it's picked (null = already loaded / system).
+const CAPTION_FONTS = {
+  fraunces:  { css: '"Fraunces", Georgia, serif',            sheet: null },
+  playfair:  { css: '"Playfair Display", Georgia, serif',    sheet: 'Playfair+Display:ital,wght@0,400..900;1,400..900' },
+  cormorant: { css: '"Cormorant Garamond", Georgia, serif',  sheet: 'Cormorant+Garamond:ital,wght@0,300..700;1,300..700' },
+  cinzel:    { css: '"Cinzel", "Times New Roman", serif',    sheet: 'Cinzel:wght@400..900' },
+  grotesk:   { css: '"Space Grotesk", system-ui, sans-serif', sheet: 'Space+Grotesk:wght@300..700' },
+  inter:     { css: '"Inter", system-ui, sans-serif',        sheet: 'Inter:ital,opsz,wght@0,14..32,100..900;1,14..32,100..900' },
+  caveat:    { css: '"Caveat", cursive',                     sheet: 'Caveat:wght@400..700' },
+  mono:      { css: '"JetBrains Mono", ui-monospace, monospace', sheet: 'JetBrains+Mono:ital,wght@0,100..800;1,100..800' },
+};
+const loadedFonts = new Set(['fraunces']);
+function loadFont(name) {
+  const f = CAPTION_FONTS[name];
+  if (!f || loadedFonts.has(name)) return;
+  loadedFonts.add(name);
+  if (!f.sheet) return;
+  const link = document.createElement('link');
+  link.rel = 'stylesheet';
+  link.href = `https://fonts.googleapis.com/css2?family=${f.sheet}&display=swap`;
+  document.head.appendChild(link);
+}
+
+// The caption's current state — applyText() merges partial updates into it,
+// then re-renders. Defaults mirror the markup so a no-op config changes nothing.
+const TEXT = {
+  heading: 'Morpho',
+  body: '{count} of points of light flying into a face. Move your pointer and they scatter, then find their way home.',
+  font: 'fraunces', italic: true,
+  headingSize: 1, bodySize: 1, rotation: 0, scaleX: 1, scaleY: 1, tracking: -0.01,
+  reveal: 'fade',      // fade | rise | blur | cascade | none
+};
+const escapeHtml = s => s.replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+
+function applyText(t) {
+  Object.assign(TEXT, t);
+  const cap = document.getElementById('caption');
+  const h1 = cap.querySelector('h1'), p = cap.querySelector('p');
+
+  // typography via the CSS custom properties the stylesheet is built on
+  loadFont(TEXT.font);
+  const st = cap.style;
+  st.setProperty('--cap-font', (CAPTION_FONTS[TEXT.font] || CAPTION_FONTS.fraunces).css);
+  st.setProperty('--cap-style', TEXT.italic ? 'italic' : 'normal');
+  st.setProperty('--cap-h-size', TEXT.headingSize);
+  st.setProperty('--cap-b-size', TEXT.bodySize);
+  st.setProperty('--cap-rot', TEXT.rotation + 'deg');
+  st.setProperty('--cap-sx', TEXT.scaleX);
+  st.setProperty('--cap-sy', TEXT.scaleY);
+  st.setProperty('--cap-track', TEXT.tracking + 'em');
+
+  // reveal class (r-fade is the .ui default, so it needs no class of its own)
+  cap.className = 'ui' + (TEXT.reveal !== 'fade' ? ' r-' + TEXT.reveal : '');
+
+  // heading: plain text normally; one span per character for the cascade
+  if (TEXT.reveal === 'cascade') {
+    h1.innerHTML = [...TEXT.heading].map((ch, i) => `<span style="--i:${i}">${escapeHtml(ch)}</span>`).join('');
+  } else {
+    h1.textContent = TEXT.heading;
+  }
+
+  // body: escaped, with {count} swapped for the live particle count
+  p.innerHTML = escapeHtml(TEXT.body)
+    .replace('{count}', `<span>${COUNT.toLocaleString()}</span>`);
+}
+
 function configure(c) {
   const bu = butterflyMat.uniforms;
   if (c.speed      !== undefined) CONFIG.speed = +c.speed;                 // 0.2 slow-motion … 3 frantic
@@ -789,14 +893,192 @@ function configure(c) {
   if (c.shape      !== undefined) bu.uShape.value = c.shape === 'dot' ? 1 : 0;   // 'dot' | 'butterfly'
   if (c.bg         !== undefined) document.documentElement.style.setProperty('--dusk', c.bg);
   if (c.bgDeep     !== undefined) document.documentElement.style.setProperty('--dusk-deep', c.bgDeep);
-  if (c.haze       !== undefined) document.getElementById('haze').style.background =
+  if (c.haze       !== undefined) {
+    CONFIG.hazeColor = c.haze;                                             // video compositor reads this too
+    document.getElementById('haze').style.background =
       `radial-gradient(70% 60% at 50% 45%, ${c.haze} 0%, transparent 60%)`;
+  }
+  if (c.text) applyText(c.text);                                           // caption content/typography/reveal (8a)
+  if (c.record) startRecording();                                          // capture a replay to WebM (8b)
   if (c.replay) replay();
 }
 SWARM.configure = configure;
 addEventListener('message', e => {
   if (e.data && e.data.type === 'morpho-config') configure(e.data.config);
 });
+
+/* --- 8b. Video capture: configure({record: true}) replays the piece and
+   records to morpho.webm. The WebGL canvas alone isn't the whole picture —
+   the background gradient, haze, vignette and caption are DOM layers — so
+   each frame is COMPOSITED onto an offscreen 2D canvas: gradients, then the
+   WebGL frame, then the caption redrawn from its live computed styles (which
+   means reveal animations appear in the video exactly as on screen).
+   Recording stops 2.5s after the face settles (30s safety cap). ----------- */
+let recorder = null;     // (recCompose itself is declared above the frame loop)
+
+function drawRecordingBackground(ctx, w, h) {
+  const css = getComputedStyle(document.documentElement);
+  const dusk = css.getPropertyValue('--dusk').trim() || '#1c1030';
+  const deep = css.getPropertyValue('--dusk-deep').trim() || '#0a0714';
+  const R = Math.max(w, h);
+  let g = ctx.createRadialGradient(w * 0.5, h * 0.4, 0, w * 0.5, h * 0.4, R * 0.85);
+  g.addColorStop(0, dusk); g.addColorStop(0.7, deep); g.addColorStop(1, deep);
+  ctx.fillStyle = g; ctx.fillRect(0, 0, w, h);
+  // haze (CSS uses mix-blend-mode: screen)
+  ctx.globalCompositeOperation = 'screen';
+  g = ctx.createRadialGradient(w * 0.5, h * 0.45, 0, w * 0.5, h * 0.45, w * 0.6);
+  g.addColorStop(0, CONFIG.hazeColor); g.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, w, h);
+  ctx.globalCompositeOperation = 'source-over';
+}
+
+function drawRecordingVignette(ctx, w, h) {
+  const g = ctx.createRadialGradient(w * 0.5, h * 0.5, 0, w * 0.5, h * 0.5, Math.max(w, h) * 0.72);
+  g.addColorStop(0.42, 'rgba(6,3,14,0)'); g.addColorStop(1, 'rgba(6,3,14,0.7)');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, w, h);
+}
+
+// Redraw the caption with its CURRENT computed styles, so opacity transitions
+// and reveal animations (rise / blur / cascade) land in the video mid-flight.
+function drawRecordingCaption(ctx) {
+  const cap = document.getElementById('caption');
+  const capCS = getComputedStyle(cap);
+  const capAlpha = parseFloat(capCS.opacity);
+  if (capAlpha < 0.01) return;
+  const capRect = cap.getBoundingClientRect();          // includes rise-translate
+  const h1 = cap.querySelector('h1'), p = cap.querySelector('p');
+  const h1CS = getComputedStyle(h1), pCS = getComputedStyle(p);
+  ctx.save();
+  ctx.globalAlpha = capAlpha;
+  if (capCS.filter !== 'none') ctx.filter = capCS.filter;   // blur-in reveal
+
+  // heading: anchor at its untransformed left-bottom (the CSS transform-origin),
+  // then replicate the rotation / squeeze-stretch from the TEXT state
+  const hx = capRect.left + h1.offsetLeft;
+  const hy = capRect.top + h1.offsetTop + h1.offsetHeight;
+  ctx.save();
+  ctx.translate(hx, hy);
+  ctx.rotate(TEXT.rotation * Math.PI / 180);
+  ctx.scale(TEXT.scaleX, TEXT.scaleY);
+  ctx.font = `${h1CS.fontStyle} ${h1CS.fontWeight} ${h1CS.fontSize} ${h1CS.fontFamily}`;
+  ctx.letterSpacing = h1CS.letterSpacing === 'normal' ? '0px' : h1CS.letterSpacing;
+  ctx.fillStyle = h1CS.color;
+  ctx.textBaseline = 'bottom';
+  const spans = h1.querySelectorAll('span');
+  if (spans.length) {                                   // cascade: per-letter state
+    let x = 0;
+    const track = parseFloat(ctx.letterSpacing) || 0;
+    spans.forEach(sp => {
+      const cs = getComputedStyle(sp);
+      const m = new DOMMatrix(cs.transform === 'none' ? '' : cs.transform);
+      ctx.save();
+      ctx.globalAlpha = capAlpha * parseFloat(cs.opacity);
+      ctx.translate(x + m.e, m.f);
+      ctx.fillText(sp.textContent, 0, 0);
+      ctx.restore();
+      x += ctx.measureText(sp.textContent).width + track;
+    });
+  } else {
+    ctx.fillText(TEXT.heading, 0, 0);
+  }
+  ctx.restore();
+
+  // body: cascade delays it with its own animation — honour its live state
+  const pAlpha = parseFloat(pCS.opacity);
+  const pMat = new DOMMatrix(pCS.transform === 'none' ? '' : pCS.transform);
+  ctx.globalAlpha = capAlpha * pAlpha;
+  ctx.font = `${pCS.fontStyle} ${pCS.fontWeight} ${pCS.fontSize} ${pCS.fontFamily}`;
+  ctx.letterSpacing = '0px';
+  ctx.textBaseline = 'alphabetic';
+  const px0 = capRect.left + p.offsetLeft + pMat.e;
+  const py0 = capRect.top + p.offsetTop + pMat.f;
+  const fontPx = parseFloat(pCS.fontSize), lineH = fontPx * 1.55;
+  const maxW = capRect.width;
+  // simple word wrap, mirroring the DOM's own line breaking closely enough
+  const words = p.textContent.split(/\s+/);
+  let line = '', y = py0 + fontPx;
+  ctx.fillStyle = pCS.color;
+  for (const word of words) {
+    const attempt = line ? line + ' ' + word : word;
+    if (ctx.measureText(attempt).width > maxW && line) {
+      ctx.fillText(line, px0, y);
+      line = word; y += lineH;
+    } else line = attempt;
+  }
+  if (line) ctx.fillText(line, px0, y);
+  ctx.restore();
+}
+
+function startRecording() {
+  if (recorder) return;                          // one recording at a time
+  const mime = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm']
+    .find(m => window.MediaRecorder && MediaRecorder.isTypeSupported(m));
+  if (!mime) { console.warn('recording not supported in this browser'); return; }
+
+  const src = renderer.domElement;
+  const comp = document.createElement('canvas');
+  comp.width = src.width; comp.height = src.height;    // device pixels
+  const ctx = comp.getContext('2d');
+  SWARM._rec = { canvas: comp, frames: 0, error: null };   // observable for tests
+
+  recorder = new MediaRecorder(comp.captureStream(60), { mimeType: mime, videoBitsPerSecond: 12e6 });
+  const chunks = [];
+  recorder.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
+  recorder.onstop = () => {
+    const url = URL.createObjectURL(new Blob(chunks, { type: 'video/webm' }));
+    const link = document.createElement('a');
+    link.href = url; link.download = 'morpho.webm';
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+    recorder = null;
+    recCompose = null;
+  };
+
+  // The compositor runs INSIDE the frame loop, right after render — a WebGL
+  // canvas without preserveDrawingBuffer is only readable at that moment;
+  // a separate rAF loop would copy an already-cleared buffer (blank dots).
+  recCompose = () => {
+    const k = comp.width / innerWidth;                 // css px -> device px
+    ctx.setTransform(k, 0, 0, k, 0, 0);
+    drawRecordingBackground(ctx, innerWidth, innerHeight);
+    ctx.drawImage(src, 0, 0, innerWidth, innerHeight);
+    drawRecordingVignette(ctx, innerWidth, innerHeight);
+    try {
+      drawRecordingCaption(ctx);                       // never let a text hiccup kill the video
+    } catch (e) {
+      if (!SWARM._rec.error) { SWARM._rec.error = String(e); console.warn('caption composite:', e); }
+    }
+    SWARM._rec.frames++;
+  };
+
+  replay();
+  recorder.start();
+  const t0 = performance.now();
+  let settledAt = 0;
+  const watch = setInterval(() => {
+    const now = performance.now();
+    if (settle > 0.999 && !settledAt) settledAt = now;
+    if ((settledAt && now - settledAt > 2500) || now - t0 > 45000) {
+      clearInterval(watch);
+      if (recorder && recorder.state !== 'inactive') recorder.stop();
+    }
+  }, 200);
+}
+
+// Console/debug helper: composite one recording-style frame onto any 2D
+// context right now (background + current WebGL frame + caption).
+SWARM._composeFrame = ctx => {
+  const k = ctx.canvas.width / innerWidth;
+  ctx.setTransform(k, 0, 0, k, 0, 0);
+  drawRecordingBackground(ctx, innerWidth, innerHeight);
+  ctx.drawImage(renderer.domElement, 0, 0, innerWidth, innerHeight);
+  drawRecordingVignette(ctx, innerWidth, innerHeight);
+  drawRecordingCaption(ctx);
+};
+
+/* --- 8c. Boot defaults: an embedding page (or the embed-export zip) can set
+   window.MORPHO_DEFAULTS before this script to ship a chosen design. -------- */
+if (window.MORPHO_DEFAULTS) configure(window.MORPHO_DEFAULTS);
 </script>
 </body>
 </html>

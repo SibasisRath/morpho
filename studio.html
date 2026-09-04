@@ -28,6 +28,9 @@
            border-radius: 6px; padding: 4px 8px; }
   input[type=color] { padding: 1px 3px; width: 52px; height: 26px; }
   input[type=file] { width: 100%; color: var(--dim); font-size: 12px; }
+  input[type=text], textarea { flex: 1; background: #2a2246; color: var(--text); border: 1px solid var(--line);
+           border-radius: 6px; padding: 5px 8px; font: inherit; }
+  textarea { width: 100%; resize: vertical; min-height: 52px; }
   button { cursor: pointer; }
   button:hover { border-color: var(--accent); }
   button:disabled { opacity: 0.4; cursor: default; }
@@ -37,6 +40,10 @@
   #status { min-height: 18px; color: var(--dim); margin-top: 8px; font-size: 12px; white-space: pre-wrap; }
   #status.err { color: #ff9d9d; }
   #previewImg { width: 100%; border-radius: 6px; margin-top: 8px; display: none; }
+  #cropCanvas, #editCanvas { width: 100%; border-radius: 6px; margin-top: 6px; cursor: crosshair;
+                             touch-action: none; display: block; }
+  #cropWrap, #editWrap { display: none; }
+  .brush.on { border-color: var(--accent); background: #3a2f60; }
   .row { display: flex; gap: 8px; margin-top: 8px; }
   .row button { flex: 1; }
   .hint { color: var(--dim); font-size: 11px; margin: 2px 0 0; }
@@ -56,9 +63,21 @@
   </div>
 
   <h2>Photo</h2>
-  <label title="Any portrait photo. The background is removed automatically (rembg); a PNG with transparency skips that and uses its own alpha as the mask.">
+  <label title="Any photo. The background is removed automatically (rembg); a PNG with transparency skips that and uses its own alpha as the mask.">
     <span>photo</span><input type="file" id="photo" accept="image/*" />
   </label>
+  <label title="face: auto-crop to the detected face and give it density priority. object: any subject — a logo, a sneaker, a bonsai — no face logic at all.">
+    <span>subject</span>
+    <select data-p="subject">
+      <option value="face" selected>face</option>
+      <option value="object">object</option>
+    </select>
+  </label>
+  <div id="cropWrap">
+    <canvas id="cropCanvas" title="Drag to select the area to bake. No selection = automatic crop."></canvas>
+    <div class="row"><button id="clearCrop" title="Remove the manual selection and go back to automatic cropping">Clear selection</button></div>
+    <p class="hint">Drag on the photo to select what gets baked. No selection = automatic.</p>
+  </div>
 
   <h2>Bake — dot placement</h2>
   <!-- data-p = pipeline parameter name in make_face_data.DEFAULTS -->
@@ -92,6 +111,19 @@
   <button id="bake" title="Run the photo → dot-cloud pipeline with the knobs above (a few seconds; segmentation runs on CPU)">Bake ⚗️</button>
   <div id="status"></div>
   <img id="previewImg" alt="bake preview" title="Left: what the mask kept (green line). Middle: the baked dots. Right: depth relief." />
+
+  <div id="editWrap">
+    <h2>Edit dots — paint corrections</h2>
+    <div class="row">
+      <button id="brushAdd" class="brush on" title="Paint where dots are missing (hair the mask ate, a void that swallowed an ear)">➕ add dots</button>
+      <button id="brushErase" class="brush" title="Paint over stray dots to remove them (background junk, shoulder artifacts)">➖ erase</button>
+      <button id="clearStrokes" title="Throw away all painted corrections">clear</button>
+    </div>
+    <label title="Diameter of the correction brush, in preview pixels.">
+      <span>brush size</span><input type="range" id="brushSize" min="4" max="60" value="18" /><output>18</output></label>
+    <canvas id="editCanvas" title="Paint corrections over the baked dots. Green adds, red erases."></canvas>
+    <p class="hint">Strokes apply on the next Bake. Unpainted areas re-bake identically (fixed seed), so you're patching, not re-rolling.</p>
+  </div>
 
   <h2>Look — live</h2>
   <label title="Particle size multiplier. Smaller = crisper halftone; bigger = softer, more merged.">
@@ -138,10 +170,69 @@
     <button id="reload" title="Reload the site frame (needed only if something looks stuck)">Reload frame</button>
   </div>
 
+  <h2>Text — live</h2>
+  <label title="Curated combinations of font, sizes, transform and reveal. Applying writes the values into the sliders below — tweak freely afterwards. Your heading/body words are kept.">
+    <span>preset</span>
+    <select id="preset">
+      <option value="editorial" selected>Editorial</option>
+      <option value="gallery">Gallery</option>
+      <option value="dream">Dream</option>
+      <option value="poster">Poster</option>
+      <option value="handwritten">Handwritten</option>
+      <option value="minimal">Minimal</option>
+    </select>
+    <button id="applyPreset" title="Apply the selected preset">Apply</button>
+  </label>
+  <label title="The big display line. Keep it short — it's typography, not a paragraph.">
+    <span>heading</span><input type="text" data-t="heading" value="Morpho" /></label>
+  <label title="The small paragraph under the heading. Write {count} anywhere to show the live particle count." style="flex-direction: column; align-items: stretch;">
+    <span>body text</span>
+    <textarea data-t="body" rows="3">{count} of points of light flying into a face. Move your pointer and they scatter, then find their way home.</textarea></label>
+  <label title="Typeface for the caption. Loaded on demand from Google Fonts — the deployed site only loads the one you ship.">
+    <span>font</span>
+    <select data-t="font">
+      <option value="fraunces" selected>Fraunces (serif)</option>
+      <option value="playfair">Playfair Display (serif)</option>
+      <option value="cormorant">Cormorant Garamond (serif)</option>
+      <option value="cinzel">Cinzel (engraved caps)</option>
+      <option value="grotesk">Space Grotesk (sans)</option>
+      <option value="inter">Inter (sans)</option>
+      <option value="caveat">Caveat (handwritten)</option>
+      <option value="mono">JetBrains Mono (code)</option>
+    </select>
+  </label>
+  <label title="Italic style for the heading."><span>italic</span><input type="checkbox" data-t="italic" checked /><span></span></label>
+  <label title="Heading size, as a multiplier of the responsive base size.">
+    <span>heading size</span><input type="range" data-t="headingSize" min="0.5" max="2" step="0.05" value="1" /><output>1</output></label>
+  <label title="Body text size, as a multiplier of the responsive base size.">
+    <span>body size</span><input type="range" data-t="bodySize" min="0.7" max="1.6" step="0.05" value="1" /><output>1</output></label>
+  <label title="Rotate the heading (degrees). Subtle angles read as handwritten/poster energy.">
+    <span>rotation</span><input type="range" data-t="rotation" min="-30" max="30" step="1" value="0" /><output>0</output></label>
+  <label title="Squeeze/stretch the heading horizontally. Below 1 condenses, above 1 widens.">
+    <span>squeeze ↔</span><input type="range" data-t="scaleX" min="0.5" max="2" step="0.05" value="1" /><output>1</output></label>
+  <label title="Squeeze/stretch the heading vertically. Above 1 gives tall poster type.">
+    <span>stretch ↕</span><input type="range" data-t="scaleY" min="0.5" max="2" step="0.05" value="1" /><output>1</output></label>
+  <label title="Letter spacing of the heading (em). Wide tracking suits caps fonts like Cinzel.">
+    <span>tracking</span><input type="range" data-t="tracking" min="-0.05" max="0.3" step="0.005" value="-0.01" /><output>-0.01</output></label>
+  <label title="How the caption enters when the face settles. Press Replay to preview it — reveals run on the flight → settle transition.">
+    <span>reveal</span>
+    <select data-t="reveal">
+      <option value="fade" selected>fade (soft)</option>
+      <option value="rise">rise</option>
+      <option value="blur">blur-in</option>
+      <option value="cascade">letter cascade</option>
+      <option value="none">none (instant)</option>
+    </select>
+  </label>
+
   <h2>Export</h2>
   <div class="row">
+    <button id="record" title="Replays the piece and records the canvas to morpho.webm (stops ~2.5s after the face settles; 30s cap). For MP4: ffmpeg -i morpho.webm -c:v libx264 -pix_fmt yuv420p morpho.mp4">Record video 🎥</button>
+    <button id="exportEmbed" title="Download a self-contained zip (index.html with this design baked in + face-data.js + README) that anyone can drop into their own site">Export embed 📦</button>
+  </div>
+  <div class="row">
     <button id="save" title="Write the current bake into the project's face-data.js — nothing goes live until you commit & push">Save to project 💾</button>
-    <button id="copyCfg" title="Copy the Look settings as JSON, for hard-coding the chosen look into index.html later">Copy look JSON</button>
+    <button id="copyCfg" title="Copy the Look + Text settings as JSON, for hard-coding the chosen design into index.html later">Copy config JSON</button>
   </div>
   <p class="hint">Save writes face-data.js in the repo — commit &amp; push makes it live.</p>
 </div>
@@ -156,8 +247,20 @@
    finished adjustment ('change' events, so drags count once). */
 const $ = s => document.querySelector(s);
 const frame = $('#frame');
-const CONTROLS = () => document.querySelectorAll('#panel input:not([type=file]), #panel select');
-const keyOf = el => el.dataset.p || el.dataset.c || el.id;
+const CONTROLS = () => document.querySelectorAll('#panel input:not([type=file]), #panel select, #panel textarea');
+const keyOf = el => el.dataset.p || el.dataset.c || el.dataset.t || el.id;
+
+/* Text presets — pure data, keys match the data-t control names. Applying a
+   preset writes these into the controls (words are kept), so presets stay
+   transparent, tweakable, and part of undo history like any manual change. */
+const PRESETS = {
+  editorial:   { font: 'fraunces',  italic: true,  headingSize: 1,    bodySize: 1,    rotation: 0,  scaleX: 1,   scaleY: 1,    tracking: -0.01, reveal: 'fade' },
+  gallery:     { font: 'cinzel',    italic: false, headingSize: 0.85, bodySize: 0.9,  rotation: 0,  scaleX: 1,   scaleY: 1,    tracking: 0.18,  reveal: 'rise' },
+  dream:       { font: 'cormorant', italic: true,  headingSize: 1.3,  bodySize: 1,    rotation: 0,  scaleX: 1,   scaleY: 1.05, tracking: 0.02,  reveal: 'blur' },
+  poster:      { font: 'playfair',  italic: false, headingSize: 1.35, bodySize: 0.95, rotation: 0,  scaleX: 0.9, scaleY: 1.45, tracking: 0.02,  reveal: 'cascade' },
+  handwritten: { font: 'caveat',    italic: false, headingSize: 1.4,  bodySize: 1,    rotation: -6, scaleX: 1,   scaleY: 1,    tracking: 0,     reveal: 'cascade' },
+  minimal:     { font: 'inter',     italic: false, headingSize: 0.7,  bodySize: 0.9,  rotation: 0,  scaleX: 1,   scaleY: 1,    tracking: 0.06,  reveal: 'rise' },
+};
 
 // live value readouts next to every slider
 document.querySelectorAll('input[type=range]').forEach(r => {
@@ -179,11 +282,35 @@ function look() {
     bgDeep: $('#bgDeep').value,
   };
 }
-function push(extra = {}) {
-  frame.contentWindow.postMessage({ type: 'morpho-config', config: { ...look(), ...extra } }, '*');
+// text config, built generically from the data-t controls
+function textConfig() {
+  const t = {};
+  document.querySelectorAll('[data-t]').forEach(el => {
+    t[el.dataset.t] = el.type === 'checkbox' ? el.checked
+                    : el.type === 'range'    ? +el.value
+                    : el.value;
+  });
+  return t;
 }
-document.querySelectorAll('[data-c], #shape, #colorMode, #tint, #bg, #bgDeep')
+function push(extra = {}) {
+  frame.contentWindow.postMessage({ type: 'morpho-config',
+    config: { ...look(), text: textConfig(), ...extra } }, '*');
+}
+document.querySelectorAll('[data-c], [data-t], #shape, #colorMode, #tint, #bg, #bgDeep')
   .forEach(el => el.addEventListener('input', () => push()));
+
+// preset: write values into the controls, then let the normal paths run
+$('#applyPreset').onclick = () => {
+  const p = PRESETS[$('#preset').value];
+  Object.entries(p).forEach(([k, v]) => {
+    const el = document.querySelector(`[data-t=${k}]`);
+    if (!el) return;
+    if (el.type === 'checkbox') el.checked = v; else el.value = v;
+    if (el.type === 'range') el.nextElementSibling.textContent = el.value;
+  });
+  push();
+  pushHistory();
+};
 $('#replay').onclick = () => push({ replay: true });
 frame.addEventListener('load', () => setTimeout(() => push(), 400));  // re-apply after any reload
 
@@ -241,6 +368,120 @@ addEventListener('keydown', e => {
 });
 updateHistoryButtons();
 
+/* ---- Crop selection: drag a rectangle on the uploaded photo -----------
+   Coordinates are kept as 0..1 fractions of the photo, which is exactly
+   what the pipeline's --crop flag takes — the studio and CLI stay twins. */
+let cropRect = null, cropImg = null, dragFrom = null;
+const cropCv = $('#cropCanvas'), cropCtx = cropCv.getContext('2d');
+
+function drawCrop() {
+  if (!cropImg) return;
+  cropCv.width = 576;                                    // crisp on the 288px panel
+  cropCv.height = Math.round(576 * cropImg.naturalHeight / cropImg.naturalWidth);
+  cropCtx.drawImage(cropImg, 0, 0, cropCv.width, cropCv.height);
+  if (!cropRect) return;
+  const { x, y, w, h } = cropRect;
+  cropCtx.fillStyle = 'rgba(0,0,0,0.55)';                // dim everything outside
+  cropCtx.fillRect(0, 0, cropCv.width, y * cropCv.height);
+  cropCtx.fillRect(0, (y + h) * cropCv.height, cropCv.width, cropCv.height);
+  cropCtx.fillRect(0, y * cropCv.height, x * cropCv.width, h * cropCv.height);
+  cropCtx.fillRect((x + w) * cropCv.width, y * cropCv.height, cropCv.width, h * cropCv.height);
+  cropCtx.strokeStyle = '#c9a1ff'; cropCtx.lineWidth = 2;
+  cropCtx.strokeRect(x * cropCv.width, y * cropCv.height, w * cropCv.width, h * cropCv.height);
+}
+const cropPos = e => {
+  const r = cropCv.getBoundingClientRect();
+  return { x: Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)),
+           y: Math.min(1, Math.max(0, (e.clientY - r.top) / r.height)) };
+};
+cropCv.addEventListener('pointerdown', e => { dragFrom = cropPos(e); cropCv.setPointerCapture(e.pointerId); });
+cropCv.addEventListener('pointermove', e => {
+  if (!dragFrom) return;
+  const p = cropPos(e);
+  cropRect = { x: Math.min(dragFrom.x, p.x), y: Math.min(dragFrom.y, p.y),
+               w: Math.abs(p.x - dragFrom.x), h: Math.abs(p.y - dragFrom.y) };
+  drawCrop();
+});
+cropCv.addEventListener('pointerup', () => {
+  dragFrom = null;
+  if (cropRect && (cropRect.w < 0.03 || cropRect.h < 0.03)) { cropRect = null; drawCrop(); }
+});
+$('#clearCrop').onclick = () => { cropRect = null; drawCrop(); };
+
+$('#photo').addEventListener('change', () => {
+  const file = $('#photo').files[0];
+  if (!file) return;
+  cropRect = null;
+  clearStrokes();                                        // strokes belong to the old photo
+  $('#editWrap').style.display = 'none';
+  cropImg = new Image();
+  cropImg.onload = () => { drawCrop(); $('#cropWrap').style.display = 'block'; };
+  cropImg.src = URL.createObjectURL(file);
+});
+
+/* ---- Edit brush: paint density corrections over the baked dots --------
+   Strokes live on an offscreen canvas at the bake's native resolution;
+   green raises the weight field (add dots), red zeroes it (erase). The
+   painted PNG rides along with the next /api/bake call. */
+let strokes = false, painting = false, brushMode = 'add';
+const editCv = $('#editCanvas'), editCtx = editCv.getContext('2d');
+const strokeCv = document.createElement('canvas');
+const strokeCtx = strokeCv.getContext('2d');
+let editBg = null;                                       // latest preview strip image
+
+function loadEditCanvas(url) {
+  editBg = new Image();
+  editBg.onload = () => {
+    const w = editBg.naturalWidth / 3, h = editBg.naturalHeight;  // preview = photo|dots|depth
+    if (strokeCv.width !== w || strokeCv.height !== h) { strokeCv.width = w; strokeCv.height = h; strokes = false; }
+    editCv.width = w; editCv.height = h;
+    redrawEdit();
+    $('#editWrap').style.display = 'block';
+  };
+  editBg.src = url;
+}
+function redrawEdit() {
+  const w = editCv.width, h = editCv.height;
+  editCtx.globalAlpha = 0.5;                             // the photo, as a ghost underneath
+  editCtx.drawImage(editBg, 0, 0, w, h, 0, 0, w, h);
+  editCtx.globalAlpha = 1;
+  editCtx.globalCompositeOperation = 'lighter';          // the dots, on top
+  editCtx.drawImage(editBg, w, 0, w, h, 0, 0, w, h);
+  editCtx.globalCompositeOperation = 'source-over';
+  editCtx.drawImage(strokeCv, 0, 0);
+}
+function clearStrokes() {
+  strokeCtx.clearRect(0, 0, strokeCv.width, strokeCv.height);
+  strokes = false;
+  if (editBg) redrawEdit();
+}
+function setBrush(mode) {
+  brushMode = mode;
+  $('#brushAdd').classList.toggle('on', mode === 'add');
+  $('#brushErase').classList.toggle('on', mode === 'erase');
+}
+$('#brushAdd').onclick = () => setBrush('add');
+$('#brushErase').onclick = () => setBrush('erase');
+$('#clearStrokes').onclick = clearStrokes;
+
+const editPos = e => {
+  const r = editCv.getBoundingClientRect();
+  return { x: (e.clientX - r.left) / r.width * editCv.width,
+           y: (e.clientY - r.top) / r.height * editCv.height };
+};
+function paint(e) {
+  const p = editPos(e);
+  strokeCtx.fillStyle = brushMode === 'add' ? 'rgba(0,230,90,0.9)' : 'rgba(255,60,60,0.9)';
+  strokeCtx.beginPath();
+  strokeCtx.arc(p.x, p.y, +$('#brushSize').value * editCv.width / 576, 0, 7);
+  strokeCtx.fill();
+  strokes = true;
+  redrawEdit();
+}
+editCv.addEventListener('pointerdown', e => { painting = true; editCv.setPointerCapture(e.pointerId); paint(e); });
+editCv.addEventListener('pointermove', e => { if (painting) paint(e); });
+editCv.addEventListener('pointerup', () => painting = false);
+
 // ---- Bake: gather pipeline knobs, POST, reload the iframe on success ----
 $('#bake').onclick = async () => {
   const fd = new FormData();
@@ -249,6 +490,8 @@ $('#bake').onclick = async () => {
   document.querySelectorAll('[data-p]').forEach(el => {
     fd.append(el.dataset.p, el.type === 'checkbox' ? (el.checked ? '1' : '0') : el.value);
   });
+  if (cropRect) fd.append('crop', [cropRect.x, cropRect.y, cropRect.w, cropRect.h].map(v => v.toFixed(4)).join(','));
+  if (strokes) fd.append('edits', await new Promise(r => strokeCv.toBlob(r, 'image/png')), 'edits.png');
   $('#bake').disabled = true;
   $('#status').textContent = 'baking… (segmentation runs on CPU, give it a few seconds)';
   $('#status').className = '';
@@ -257,14 +500,36 @@ $('#bake').onclick = async () => {
     const out = await res.json();
     if (!res.ok) throw new Error(out.error || res.statusText);
     $('#status').textContent = `baked ${out.count.toLocaleString()} points (~${out.kb} KB)`;
-    $('#previewImg').src = '/api/preview.png?' + Date.now();
+    const url = '/api/preview.png?' + Date.now();
+    $('#previewImg').src = url;
     $('#previewImg').style.display = 'block';
+    loadEditCanvas(url);                                 // refresh the correction canvas
     reloadFrame();
   } catch (e) {
     $('#status').textContent = e.message;
     $('#status').className = 'err';
   }
   $('#bake').disabled = false;
+};
+
+// ---- Record & embed export ----
+$('#record').onclick = () => {
+  push({ record: true });
+  $('#status').className = '';
+  $('#status').textContent = 'recording… downloads morpho.webm when the face settles (watch the frame)';
+};
+$('#exportEmbed').onclick = async () => {
+  const res = await fetch('/api/export-embed', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...look(), text: textConfig() }),
+  });
+  $('#status').className = res.ok ? '' : 'err';
+  if (!res.ok) { $('#status').textContent = (await res.json()).error; return; }
+  const url = URL.createObjectURL(await res.blob());
+  const link = document.createElement('a');
+  link.href = url; link.download = 'morpho-embed.zip'; link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+  $('#status').textContent = 'morpho-embed.zip downloaded — a self-contained folder for any site';
 };
 
 // ---- Export ----
@@ -275,8 +540,8 @@ $('#save').onclick = async () => {
   $('#status').textContent = res.ok ? 'saved face-data.js — ready to commit' : out.error;
 };
 $('#copyCfg').onclick = () => {
-  navigator.clipboard.writeText(JSON.stringify(look(), null, 2));
-  $('#status').textContent = 'look config copied to clipboard';
+  navigator.clipboard.writeText(JSON.stringify({ ...look(), text: textConfig() }, null, 2));
+  $('#status').textContent = 'config (look + text) copied to clipboard';
 };
 </script>
 </body>
